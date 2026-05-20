@@ -10,6 +10,24 @@ app.use('/static/*', serveStatic({ root: './' }))
 // ─── Config ────────────────────────────────────────────────────────────────────
 const ADMIN_PASSWORD = 'bounty2025'   // change before deploy
 
+// ─── User Store ────────────────────────────────────────────────────────────────
+type Role = 'rep' | 'admin'
+interface User {
+  id: string
+  name: string
+  username: string   // login handle (lowercase, no spaces)
+  password: string
+  role: Role
+  createdAt: string
+}
+
+const users: User[] = [
+  { id: 'u-admin', name: 'Admin',      username: 'admin',   password: 'bounty2025', role: 'admin', createdAt: new Date().toISOString() },
+  { id: 'u-sarah', name: 'Sarah M.',   username: 'sarah',   password: 'rep1234',    role: 'rep',   createdAt: new Date().toISOString() },
+  { id: 'u-jake',  name: 'Jake T.',    username: 'jake',    password: 'rep1234',    role: 'rep',   createdAt: new Date().toISOString() },
+  { id: 'u-carmen',name: 'Carmen R.',  username: 'carmen',  password: 'rep1234',    role: 'rep',   createdAt: new Date().toISOString() },
+]
+
 // ─── Types ─────────────────────────────────────────────────────────────────────
 type Priority = 'top-bounty' | 'high-priority' | 'gap-killer' | 'standard'
 type Status = 'active' | 'filled' | 'expired'
@@ -128,40 +146,95 @@ const leaderboard: { name: string; total: number; bookings: number }[] = [
 ]
 
 // ─── Auth ──────────────────────────────────────────────────────────────────────
-// Simple session store -- maps token -> expiry timestamp
-const sessions: Map<string, number> = new Map()
+// Session store: token -> { userId, role, expires }
+interface Session { userId: string; role: Role; name: string; expires: number }
+const sessions: Map<string, Session> = new Map()
 
 function makeToken() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
 }
 
+function getSession(token: string | undefined): Session | null {
+  if (!token) return null
+  const s = sessions.get(token)
+  if (!s) return null
+  if (Date.now() > s.expires) { sessions.delete(token); return null }
+  return s
+}
+
 function isValidSession(token: string | undefined): boolean {
-  if (!token) return false
-  const exp = sessions.get(token)
-  if (!exp) return false
-  if (Date.now() > exp) { sessions.delete(token); return false }
-  return true
+  return getSession(token) !== null
+}
+
+function isAdmin(token: string | undefined): boolean {
+  const s = getSession(token)
+  return s !== null && s.role === 'admin'
 }
 
 app.post('/api/auth/login', async (c) => {
-  const { password } = await c.req.json<{ password: string }>()
-  if (password !== ADMIN_PASSWORD) {
-    return c.json({ error: 'Invalid password' }, 401)
-  }
+  const { username, password } = await c.req.json<{ username: string; password: string }>()
+  const user = users.find(u => u.username === username.toLowerCase().trim() && u.password === password)
+  if (!user) return c.json({ error: 'Invalid username or password' }, 401)
   const token = makeToken()
-  sessions.set(token, Date.now() + 4 * 60 * 60 * 1000) // 4-hour session
-  return c.json({ token })
+  sessions.set(token, { userId: user.id, role: user.role, name: user.name, expires: Date.now() + 8 * 60 * 60 * 1000 })
+  return c.json({ token, role: user.role, name: user.name })
 })
 
 app.post('/api/auth/logout', async (c) => {
-  const token = c.req.header('x-admin-token')
+  const token = c.req.header('x-auth-token')
   if (token) sessions.delete(token)
   return c.json({ ok: true })
 })
 
 app.get('/api/auth/check', (c) => {
-  const token = c.req.header('x-admin-token')
-  return c.json({ valid: isValidSession(token) })
+  const token = c.req.header('x-auth-token')
+  const s = getSession(token)
+  return c.json(s ? { valid: true, role: s.role, name: s.name } : { valid: false })
+})
+
+// ─── Users API (admin only) ─────────────────────────────────────────────────────
+app.get('/api/users', (c) => {
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  return c.json(users.map(u => ({ id: u.id, name: u.name, username: u.username, role: u.role, createdAt: u.createdAt })))
+})
+
+app.post('/api/users', async (c) => {
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  const body = await c.req.json<{ name: string; username: string; password: string; role: Role }>()
+  if (!body.name || !body.username || !body.password) return c.json({ error: 'name, username, password required' }, 400)
+  const slug = body.username.toLowerCase().trim().replace(/\s+/g, '')
+  if (users.find(u => u.username === slug)) return c.json({ error: 'Username already taken' }, 409)
+  const newUser: User = {
+    id: 'u-' + Date.now(),
+    name: body.name.trim(),
+    username: slug,
+    password: body.password,
+    role: body.role === 'admin' ? 'admin' : 'rep',
+    createdAt: new Date().toISOString(),
+  }
+  users.push(newUser)
+  return c.json({ id: newUser.id, name: newUser.name, username: newUser.username, role: newUser.role }, 201)
+})
+
+app.patch('/api/users/:id', async (c) => {
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  const user = users.find(u => u.id === c.req.param('id'))
+  if (!user) return c.json({ error: 'Not found' }, 404)
+  const body = await c.req.json<{ name?: string; password?: string; role?: Role }>()
+  if (body.name)     user.name     = body.name.trim()
+  if (body.password) user.password = body.password
+  if (body.role)     user.role     = body.role === 'admin' ? 'admin' : 'rep'
+  return c.json({ id: user.id, name: user.name, username: user.username, role: user.role })
+})
+
+app.delete('/api/users/:id', async (c) => {
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  const idx = users.findIndex(u => u.id === c.req.param('id'))
+  if (idx === -1) return c.json({ error: 'Not found' }, 404)
+  if (users[idx].role === 'admin' && users.filter(u => u.role === 'admin').length === 1)
+    return c.json({ error: 'Cannot remove last admin' }, 400)
+  users.splice(idx, 1)
+  return c.json({ ok: true })
 })
 
 // ─── Properties API ────────────────────────────────────────────────────────────
@@ -176,7 +249,7 @@ app.get('/api/properties/:id', (c) => {
 })
 
 app.post('/api/properties', async (c) => {
-  if (!isValidSession(c.req.header('x-admin-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const body = await c.req.json<Omit<Property, 'id' | 'postedAt'>>()
   const newProp: Property = {
     ...body,
@@ -189,7 +262,7 @@ app.post('/api/properties', async (c) => {
 
 // Full property update (inline edit)
 app.patch('/api/properties/:id', async (c) => {
-  if (!isValidSession(c.req.header('x-admin-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const prop = properties.find((p) => p.id === c.req.param('id'))
   if (!prop) return c.json({ error: 'Not found' }, 404)
 
@@ -230,7 +303,7 @@ app.patch('/api/properties/:id', async (c) => {
 })
 
 app.patch('/api/properties/:id/status', async (c) => {
-  if (!isValidSession(c.req.header('x-admin-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const prop = properties.find((p) => p.id === c.req.param('id'))
   if (!prop) return c.json({ error: 'Not found' }, 404)
   const { status } = await c.req.json<{ status: Status }>()
@@ -239,7 +312,7 @@ app.patch('/api/properties/:id/status', async (c) => {
 })
 
 app.delete('/api/properties/:id', (c) => {
-  if (!isValidSession(c.req.header('x-admin-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const idx = properties.findIndex((p) => p.id === c.req.param('id'))
   if (idx === -1) return c.json({ error: 'Not found' }, 404)
   properties.splice(idx, 1)
@@ -252,7 +325,7 @@ app.get('/api/bonus-rules', (c) => {
 })
 
 app.patch('/api/bonus-rules', async (c) => {
-  if (!isValidSession(c.req.header('x-admin-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const body = await c.req.json<Partial<typeof bonusRules>>()
   if (body.lastMinute) {
     if (typeof body.lastMinute.amount      === 'number') bonusRules.lastMinute.amount      = body.lastMinute.amount
@@ -318,7 +391,7 @@ app.post('/api/bookings', async (c) => {
 })
 
 app.patch('/api/bookings/:id/status', async (c) => {
-  if (!isValidSession(c.req.header('x-admin-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const booking = bookings.find((b) => b.id === c.req.param('id'))
   if (!booking) return c.json({ error: 'Not found' }, 404)
   const { status } = await c.req.json<{ status: Booking['status'] }>()
@@ -455,13 +528,17 @@ app.get('*', (c) => {
     }
     .edit-input:focus { box-shadow: 0 0 0 2px rgba(212,160,23,0.35); }
 
-    /* ── Admin login overlay ── */
-    #admin-gate {
-      position:fixed; inset:0; background:rgba(20,10,0,0.92);
+    /* ── Login overlay ── */
+    #login-gate {
+      position:fixed; inset:0; background:rgba(20,10,0,0.93);
       display:flex; align-items:center; justify-content:center;
       z-index:9999;
     }
-    #admin-gate.hidden { display:none; }
+    #login-gate.hidden { display:none; }
+
+    /* ── Role badges ── */
+    .role-admin { background:#c0392b; color:#fff; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; padding:2px 7px; border-radius:999px; }
+    .role-rep   { background:#1e6b3a; color:#fff; font-size:9px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; padding:2px 7px; border-radius:999px; }
 
     /* ── Changelog ── */
     .cl-increase { border-left: 3px solid #d4a017; background: #fffbee; }
@@ -481,27 +558,39 @@ app.get('*', (c) => {
 </head>
 <body class="min-h-screen text-gray-800">
 
-<!-- ════════════ ADMIN LOGIN GATE ════════════ -->
-<div id="admin-gate" class="hidden">
-  <div class="parchment rounded-2xl p-8 w-full max-w-sm card-shadow relative">
-    <div class="pin pin-red" style="top:-7px;left:50%;transform:translateX(-50%)"></div>
-    <div class="text-center mb-6">
+<!-- ════════════ LOGIN GATE (rep + admin) ════════════ -->
+<div id="login-gate" class="hidden">
+  <div class="parchment rounded-2xl p-8 w-full max-w-sm card-shadow relative" style="overflow:visible;">
+    <div class="pin pin-red" style="top:-8px;left:50%;transform:translateX(-50%)"></div>
+    <div class="text-center mb-5">
       <div class="flex justify-center mb-3">
-        <div style="width:80px;height:100px;border-radius:50%;border:3px solid #1a1208;overflow:hidden;background:white;display:flex;align-items:center;justify-content:center;">
+        <div style="width:72px;height:90px;border-radius:50%;border:3px solid #1a1208;overflow:hidden;background:white;display:flex;align-items:center;justify-content:center;">
           <img src="/static/th-logo.png" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center top;" />
         </div>
       </div>
-      <div class="font-display text-bounty-dark text-2xl font-black">Admin Access</div>
-      <p class="text-gray-500 text-sm mt-1">Enter the admin password to continue</p>
+      <div class="font-display text-bounty-dark text-2xl font-black" id="gate-title">Sign In</div>
+      <p class="text-gray-500 text-xs mt-1" id="gate-subtitle">Sign in to log bookings or access admin tools</p>
     </div>
-    <div id="gate-error" class="hidden mb-3 text-center text-bounty-red text-sm font-semibold bg-red-50 rounded px-3 py-2">
-      Incorrect password. Try again.
+    <div id="gate-error" class="hidden mb-3 text-center text-bounty-red text-sm font-semibold bg-red-50 rounded px-3 py-2"></div>
+    <div class="space-y-3">
+      <div>
+        <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Username</label>
+        <input type="text" id="gate-user" placeholder="your username" autocomplete="username"
+          class="th-input" onkeydown="if(event.key==='Enter')document.getElementById('gate-pw').focus()" />
+      </div>
+      <div>
+        <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Password</label>
+        <input type="password" id="gate-pw" placeholder="password" autocomplete="current-password"
+          class="th-input" onkeydown="if(event.key==='Enter')doLogin()" />
+      </div>
     </div>
-    <input type="password" id="gate-pw" placeholder="Admin password"
-      class="th-input mb-3" onkeydown="if(event.key==='Enter')doLogin()" />
     <button onclick="doLogin()"
-      class="w-full py-2.5 bg-bounty-dark text-white font-bold rounded uppercase tracking-wide hover:bg-bounty-brown transition-all text-sm">
-      <i class="fas fa-lock-open mr-1.5"></i> Unlock Admin
+      class="mt-4 w-full py-2.5 bg-bounty-dark text-white font-bold rounded uppercase tracking-wide hover:bg-bounty-brown transition-all text-sm">
+      <i class="fas fa-sign-in-alt mr-1.5"></i> Sign In
+    </button>
+    <button onclick="closeLoginGate()"
+      class="mt-2 w-full py-1.5 text-gray-400 text-xs hover:text-gray-600 transition-colors">
+      Cancel
     </button>
   </div>
 </div>
@@ -528,7 +617,7 @@ app.get('*', (c) => {
           class="nav-btn nav-active px-4 py-2 text-white text-sm font-semibold">
           <i class="fas fa-clipboard-list mr-1 text-bounty-gold"></i>Board
         </button>
-        <button onclick="showTab('submit')" id="tab-submit"
+        <button onclick="gotoSubmit()" id="tab-submit"
           class="nav-btn px-4 py-2 text-bounty-tan/60 text-sm font-semibold hover:text-white">
           <i class="fas fa-plus-circle mr-1"></i>Log Booking
         </button>
@@ -538,9 +627,23 @@ app.get('*', (c) => {
         </button>
         <button onclick="gotoAdmin()" id="tab-admin"
           class="nav-btn px-4 py-2 text-bounty-tan/60 text-sm font-semibold hover:text-white">
-          <i class="fas fa-lock mr-1 text-xs"></i>Admin
+          <i class="fas fa-shield-alt mr-1 text-xs"></i>Admin
         </button>
       </nav>
+
+      <!-- Logged-in user chip -->
+      <div id="user-chip" class="hidden flex-shrink-0 flex items-center gap-2">
+        <span id="user-chip-name" class="text-bounty-tan text-xs font-semibold"></span>
+        <span id="user-chip-role" class="role-rep"></span>
+        <button onclick="doLogout()" title="Sign out"
+          class="text-bounty-tan/50 hover:text-bounty-tan text-xs border border-bounty-tan/20 rounded px-2 py-0.5 transition-all">
+          <i class="fas fa-sign-out-alt"></i>
+        </button>
+      </div>
+      <button id="user-signin-btn" onclick="openLoginGate('general')"
+        class="flex-shrink-0 text-bounty-tan/60 hover:text-bounty-gold text-xs border border-bounty-tan/20 rounded px-3 py-1.5 transition-all">
+        <i class="fas fa-user mr-1"></i> Sign In
+      </button>
     </div>
     <div class="text-center pb-2">
       <p class="text-bounty-gold/50 text-xs tracking-widest uppercase">Fill More Nights &bull; Earn Rewards &bull; Be the Hero</p>
@@ -651,7 +754,21 @@ app.get('*', (c) => {
 
 <!-- ════════════ LOG BOOKING TAB ════════════ -->
 <div id="view-submit" class="view hidden bg-bounty-tan min-h-screen p-6">
-  <div class="max-w-2xl mx-auto">
+  <!-- Login required wall (shown when not logged in) -->
+  <div id="submit-login-wall" class="hidden max-w-md mx-auto text-center py-20">
+    <div class="parchment rounded-2xl p-10 card-shadow" style="overflow:visible;">
+      <div class="pin pin-gold"></div>
+      <i class="fas fa-user-lock text-4xl text-bounty-gold mb-4"></i>
+      <div class="font-display text-bounty-dark text-2xl font-black mb-2">Sign In Required</div>
+      <p class="text-gray-500 text-sm mb-6">You need to be signed in to log a booking and earn a bounty.</p>
+      <button onclick="openLoginGate('submit')"
+        class="px-6 py-2.5 bg-bounty-dark text-white font-bold rounded uppercase tracking-wide hover:bg-bounty-brown transition-all text-sm">
+        <i class="fas fa-sign-in-alt mr-1.5"></i> Sign In to Continue
+      </button>
+    </div>
+  </div>
+
+  <div id="submit-form-wrap" class="max-w-2xl mx-auto">
     <div class="parchment rounded-xl p-8 card-shadow relative">
       <div class="pin pin-gold"></div>
       <div class="text-center mb-6">
@@ -661,8 +778,8 @@ app.get('*', (c) => {
       <form id="booking-form" class="space-y-4" onsubmit="submitBooking(event)">
         <div class="grid grid-cols-2 gap-4">
           <div>
-            <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Your Name *</label>
-            <input type="text" id="f-agent" required placeholder="Agent name" class="th-input" />
+            <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Your Name</label>
+            <input type="text" id="f-agent" required placeholder="Agent name" class="th-input bg-gray-50" readonly style="cursor:not-allowed;opacity:0.8;" />
           </div>
           <div>
             <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Guest Name *</label>
@@ -737,6 +854,7 @@ app.get('*', (c) => {
       </div>
     </div>
   </div>
+  </div><!-- /submit-form-wrap -->
 </div>
 
 <!-- ════════════ LEADERBOARD TAB ════════════ -->
@@ -775,6 +893,41 @@ app.get('*', (c) => {
         class="text-xs text-bounty-tan/60 hover:text-bounty-tan border border-bounty-tan/20 rounded px-3 py-1 transition-all">
         <i class="fas fa-sign-out-alt mr-1"></i> Log Out
       </button>
+    </div>
+
+    <!-- User Management -->
+    <div class="parchment rounded-xl overflow-hidden card-shadow">
+      <div class="bg-bounty-dark px-5 py-3 flex items-center gap-2">
+        <i class="fas fa-users text-bounty-gold"></i>
+        <span class="font-display text-white text-base font-bold">Team Accounts</span>
+        <span class="ml-auto text-bounty-tan/40 text-xs">Reps must sign in to log bookings</span>
+      </div>
+      <div class="p-5">
+        <div id="admin-user-list" class="space-y-2 mb-4"></div>
+        <!-- Add user form -->
+        <div class="border border-bounty-gold/20 rounded-lg p-4 bg-white/40">
+          <div class="font-bold text-bounty-dark text-sm mb-3"><i class="fas fa-user-plus text-bounty-gold mr-1"></i> Add New Account</div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+            <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Full Name *</label>
+              <input type="text" id="nu-name" placeholder="e.g. Morgan S." class="th-input" /></div>
+            <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Username *</label>
+              <input type="text" id="nu-username" placeholder="e.g. morgan" class="th-input" /></div>
+            <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Password *</label>
+              <input type="password" id="nu-password" placeholder="initial password" class="th-input" /></div>
+            <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Role *</label>
+              <select id="nu-role" class="th-input">
+                <option value="rep">Rep</option>
+                <option value="admin">Admin</option>
+              </select></div>
+          </div>
+          <div class="flex items-center gap-3">
+            <button onclick="addUser()" class="px-4 py-1.5 bg-bounty-red text-white font-bold rounded text-xs uppercase hover:bg-red-800 transition-all">
+              <i class="fas fa-plus mr-1"></i> Add Account
+            </button>
+            <span id="user-add-msg" class="text-xs text-bounty-green font-semibold hidden"></span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Post New Property -->
@@ -893,50 +1046,114 @@ let allProperties  = [];
 let allBookings    = [];
 let allLeaderboard = [];
 let allChangelog   = [];
+let allUsers       = [];
 let allBonusRules  = { lastMinute:{amount:25,label:'LAST MINUTE HERO',description:'within 14 days',icon:'bolt'}, weekend:{amount:15,label:'WEEKEND WARRIOR',description:'Fri or Sat night',icon:'calendar-week'}, longStay:{amount:15,label:'LONG STAY LEGEND',description:'5+ nights',icon:'moon'} };
-let adminToken     = sessionStorage.getItem('adminToken') || null;
+
+// ─ Auth state ─
+let authToken = sessionStorage.getItem('authToken') || null;
+let authRole  = sessionStorage.getItem('authRole')  || null;  // 'rep' | 'admin'
+let authName  = sessionStorage.getItem('authName')  || null;
+let _loginTarget = null;  // 'submit' | 'admin' | 'general' -- where to navigate after login
 
 // ════════════════════════════════════════════════════════════
-//  ADMIN AUTH
+//  AUTH
 // ════════════════════════════════════════════════════════════
+function openLoginGate(target) {
+  _loginTarget = target || 'general';
+  const err = document.getElementById('gate-error');
+  err.classList.add('hidden'); err.textContent = '';
+  document.getElementById('gate-user').value = '';
+  document.getElementById('gate-pw').value   = '';
+  document.getElementById('login-gate').classList.remove('hidden');
+  setTimeout(() => document.getElementById('gate-user').focus(), 80);
+}
+
+function closeLoginGate() {
+  document.getElementById('login-gate').classList.add('hidden');
+  _loginTarget = null;
+}
+
 async function doLogin() {
-  const pw = document.getElementById('gate-pw').value;
+  const username = document.getElementById('gate-user').value.trim();
+  const password = document.getElementById('gate-pw').value;
+  const err = document.getElementById('gate-error');
+  if (!username || !password) {
+    err.textContent = 'Enter your username and password.';
+    err.classList.remove('hidden');
+    return;
+  }
   const res = await fetch('/api/auth/login', {
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({password: pw}),
+    body: JSON.stringify({ username, password }),
   });
   if (!res.ok) {
-    document.getElementById('gate-error').classList.remove('hidden');
+    err.textContent = 'Incorrect username or password. Try again.';
+    err.classList.remove('hidden');
     document.getElementById('gate-pw').value = '';
     return;
   }
-  const { token } = await res.json();
-  adminToken = token;
-  sessionStorage.setItem('adminToken', token);
-  document.getElementById('admin-gate').classList.add('hidden');
-  document.getElementById('gate-error').classList.add('hidden');
-  renderAdmin();
+  const { token, role, name } = await res.json();
+  authToken = token; authRole = role; authName = name;
+  sessionStorage.setItem('authToken', token);
+  sessionStorage.setItem('authRole',  role);
+  sessionStorage.setItem('authName',  name);
+  document.getElementById('login-gate').classList.add('hidden');
+  updateUserChip();
+  // Navigate to where the user wanted to go
+  const target = _loginTarget; _loginTarget = null;
+  if (target === 'submit') { showTab('submit'); }
+  else if (target === 'admin' && role === 'admin') { showTab('admin'); }
+  else { showTab('board'); }
+  if (role === 'admin') renderAdmin();
 }
 
 async function doLogout() {
-  if (adminToken) {
-    await fetch('/api/auth/logout', {
-      method:'POST', headers:{'x-admin-token': adminToken}
-    });
+  if (authToken) {
+    await fetch('/api/auth/logout', { method:'POST', headers:{'x-auth-token': authToken} });
   }
-  adminToken = null;
-  sessionStorage.removeItem('adminToken');
+  authToken = null; authRole = null; authName = null;
+  sessionStorage.removeItem('authToken');
+  sessionStorage.removeItem('authRole');
+  sessionStorage.removeItem('authName');
+  updateUserChip();
   showTab('board');
-  document.getElementById('tab-admin').classList.remove('nav-active');
+}
+
+function updateUserChip() {
+  const chip    = document.getElementById('user-chip');
+  const signinB = document.getElementById('user-signin-btn');
+  if (authToken && authName) {
+    document.getElementById('user-chip-name').textContent = authName;
+    const roleEl = document.getElementById('user-chip-role');
+    roleEl.textContent = authRole === 'admin' ? 'Admin' : 'Rep';
+    roleEl.className   = authRole === 'admin' ? 'role-admin' : 'role-rep';
+    chip.classList.remove('hidden');
+    signinB.classList.add('hidden');
+    // Pre-fill and lock agent name on booking form
+    const agentInput = document.getElementById('f-agent');
+    if (agentInput) { agentInput.value = authName; }
+  } else {
+    chip.classList.add('hidden');
+    signinB.classList.remove('hidden');
+  }
+  // Show/hide submit wall vs form
+  const wall = document.getElementById('submit-login-wall');
+  const form = document.getElementById('submit-form-wrap');
+  if (wall && form) {
+    if (authToken) { wall.classList.add('hidden'); form.classList.remove('hidden'); }
+    else           { wall.classList.remove('hidden'); form.classList.add('hidden'); }
+  }
+}
+
+function gotoSubmit() {
+  if (!authToken) { openLoginGate('submit'); return; }
+  showTab('submit');
 }
 
 function gotoAdmin() {
-  if (!adminToken) {
-    document.getElementById('admin-gate').classList.remove('hidden');
-    // highlight the tab anyway so user knows where they're headed
-    return;
-  }
+  if (!authToken)              { openLoginGate('admin'); return; }
+  if (authRole !== 'admin')    { alert('Admin access only. You are signed in as a Rep.'); return; }
   showTab('admin');
 }
 
@@ -958,7 +1175,9 @@ function showTab(name) {
   }
   if (name === 'board')       renderBoard();
   if (name === 'leaderboard') renderLeaderboard();
-  if (name === 'admin')       renderAdmin();
+  if (name === 'admin') { fetchUsers().then(() => renderAdmin()); }
+  // Update submit wall visibility whenever tab changes
+  updateUserChip();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -978,6 +1197,11 @@ async function fetchChangelog() {
 }
 async function fetchBonusRules() {
   const r = await fetch('/api/bonus-rules'); allBonusRules = await r.json();
+}
+async function fetchUsers() {
+  if (!authToken || authRole !== 'admin') return;
+  const r = await fetch('/api/users', { headers:{'x-auth-token': authToken} });
+  if (r.ok) allUsers = await r.json();
 }
 
 function renderBonusPills() {
@@ -1050,7 +1274,7 @@ async function saveBonusRules() {
   };
   const res = await fetch('/api/bonus-rules', {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-admin-token': adminToken||''},
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
     body: JSON.stringify(payload),
   });
   if (!res.ok) { alert('Save failed -- are you still logged in?'); return; }
@@ -1195,10 +1419,83 @@ function renderLeaderboard() {
 //  ADMIN RENDER
 // ════════════════════════════════════════════════════════════
 function renderAdmin() {
+  renderAdminUsers();
   renderAdminProps();
   renderBonusRulesForm();
   renderAdminChangelog();
   renderAdminBookings();
+}
+
+function renderAdminUsers() {
+  const list = document.getElementById('admin-user-list');
+  if (!list) return;
+  if (allUsers.length === 0) {
+    list.innerHTML = '<p class="text-gray-400 text-sm text-center py-2">No accounts loaded.</p>';
+    return;
+  }
+  list.innerHTML = allUsers.map(u => \`
+    <div class="flex flex-wrap items-center gap-3 bg-white/60 rounded-lg px-4 py-2.5 border border-bounty-gold/15">
+      <div class="flex items-center gap-2 min-w-0 flex-1">
+        <i class="fas fa-user-circle text-bounty-brown text-lg flex-shrink-0"></i>
+        <div>
+          <div class="font-bold text-bounty-dark text-sm">\${u.name}</div>
+          <div class="text-gray-400 text-xs">@\${u.username}</div>
+        </div>
+      </div>
+      <span class="\${u.role === 'admin' ? 'role-admin' : 'role-rep'}">\${u.role}</span>
+      <div class="flex gap-2 ml-auto">
+        <button onclick="promptResetPassword('\${u.id}','\${u.name.replace(/'/g,'&amp;#39;')}')"
+          class="text-xs px-2 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10 transition-all">
+          <i class="fas fa-key mr-1"></i>Reset PW
+        </button>
+        \${u.id !== 'u-admin' ? \`<button onclick="deleteUser('\${u.id}','\${u.name.replace(/'/g,'&amp;#39;')}')"
+          class="text-xs px-2 py-1 border border-red-200 rounded text-red-500 hover:bg-red-50 transition-all">
+          <i class="fas fa-trash mr-1"></i>Remove
+        </button>\` : ''}
+      </div>
+    </div>
+  \`).join('');
+}
+
+async function addUser() {
+  const name     = document.getElementById('nu-name').value.trim();
+  const username = document.getElementById('nu-username').value.trim();
+  const password = document.getElementById('nu-password').value;
+  const role     = document.getElementById('nu-role').value;
+  const msg      = document.getElementById('user-add-msg');
+  if (!name || !username || !password) { msg.textContent='Fill in all fields.'; msg.className='text-xs text-bounty-red font-semibold'; msg.classList.remove('hidden'); return; }
+  const res = await fetch('/api/users', {
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    body: JSON.stringify({ name, username, password, role }),
+  });
+  const data = await res.json();
+  if (!res.ok) { msg.textContent = data.error || 'Error adding user.'; msg.className='text-xs text-bounty-red font-semibold'; msg.classList.remove('hidden'); return; }
+  msg.textContent = 'Account created!'; msg.className='text-xs text-bounty-green font-semibold'; msg.classList.remove('hidden');
+  document.getElementById('nu-name').value=''; document.getElementById('nu-username').value=''; document.getElementById('nu-password').value='';
+  await fetchUsers(); renderAdminUsers();
+  setTimeout(() => msg.classList.add('hidden'), 3000);
+}
+
+async function promptResetPassword(userId, userName) {
+  const newPw = prompt(\`New password for \${userName}:\`);
+  if (!newPw || !newPw.trim()) return;
+  const res = await fetch(\`/api/users/\${userId}\`, {
+    method:'PATCH',
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    body: JSON.stringify({ password: newPw.trim() }),
+  });
+  if (res.ok) alert(\`Password updated for \${userName}.\`);
+  else alert('Failed to update password.');
+}
+
+async function deleteUser(userId, userName) {
+  if (!confirm(\`Remove \${userName}? They will be signed out immediately.\`)) return;
+  const res = await fetch(\`/api/users/\${userId}\`, {
+    method:'DELETE', headers:{'x-auth-token': authToken||''}
+  });
+  if (!res.ok) { const d = await res.json(); alert(d.error || 'Delete failed.'); return; }
+  await fetchUsers(); renderAdminUsers();
 }
 
 function renderAdminProps() {
@@ -1309,7 +1606,7 @@ async function savePropertyEdit(id) {
   });
   const res = await fetch(\`/api/properties/\${id}\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-admin-token': adminToken||''},
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
     body: JSON.stringify(updates),
   });
   if (res.status === 401) { alert('Session expired. Please log in again.'); doLogout(); return; }
@@ -1462,7 +1759,7 @@ async function addProperty(e) {
   e.preventDefault();
   const res = await fetch('/api/properties', {
     method:'POST',
-    headers:{'Content-Type':'application/json','x-admin-token': adminToken||''},
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
     body: JSON.stringify({
       name:           document.getElementById('a-name').value,
       priority:       document.getElementById('a-priority').value,
@@ -1487,7 +1784,7 @@ async function addProperty(e) {
 async function updatePropStatus(id, status) {
   await fetch(\`/api/properties/\${id}/status\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-admin-token': adminToken||''},
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
     body: JSON.stringify({status}),
   });
   await fetchProperties();
@@ -1498,7 +1795,7 @@ async function updatePropStatus(id, status) {
 async function deleteProp(id) {
   if (!confirm('Remove this property from the board?')) return;
   await fetch(\`/api/properties/\${id}\`, {
-    method:'DELETE', headers:{'x-admin-token': adminToken||''}
+    method:'DELETE', headers:{'x-auth-token': authToken||''}
   });
   await fetchProperties();
   renderAdmin();
@@ -1509,7 +1806,7 @@ async function deleteProp(id) {
 async function updateBookingStatus(id, status) {
   await fetch(\`/api/bookings/\${id}/status\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-admin-token': adminToken||''},
+    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
     body: JSON.stringify({status}),
   });
   await fetchBookings();
@@ -1521,6 +1818,12 @@ async function updateBookingStatus(id, status) {
 // ════════════════════════════════════════════════════════════
 async function init() {
   await Promise.all([fetchProperties(), fetchBookings(), fetchLeaderboard(), fetchChangelog(), fetchBonusRules()]);
+  // Restore session from sessionStorage
+  updateUserChip();
+  // If admin was previously logged in, pre-load users
+  if (authToken && authRole === 'admin') {
+    await fetchUsers();
+  }
   renderBoard();
   renderBonusPills();
   populatePropertySelect();
