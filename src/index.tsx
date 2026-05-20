@@ -371,7 +371,7 @@ app.get('*', (c) => {
     .nav-active { border-bottom: 2px solid #d4a017 !important; color:#fff !important; }
 
     /* ── Pushpins ── */
-    .pin { width:14px; height:14px; border-radius:50%; position:absolute; top:-7px; left:50%; transform:translateX(-50%); box-shadow:0 2px 5px rgba(0,0,0,0.55); }
+    .pin { width:16px; height:16px; border-radius:50%; position:absolute; top:-8px; left:50%; transform:translateX(-50%); box-shadow:0 2px 6px rgba(0,0,0,0.6); z-index:10; }
     .pin-red    { background:radial-gradient(circle at 35% 35%,#ff6b6b,#c0392b); }
     .pin-gold   { background:radial-gradient(circle at 35% 35%,#ffe066,#d4a017); }
     .pin-blue   { background:radial-gradient(circle at 35% 35%,#74b9ff,#1a3a5c); }
@@ -583,7 +583,7 @@ app.get('*', (c) => {
       <!-- How It Works + Rules -->
       <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mt-6">
 
-        <div class="parchment rounded-lg p-5 relative card-shadow">
+        <div class="parchment rounded-lg p-5 relative card-shadow" style="overflow:visible;margin-top:10px;">
           <div class="pin pin-blue"></div>
           <h3 class="font-display text-bounty-dark text-lg font-black mb-4 flex items-center gap-2">
             <i class="fas fa-flag-checkered text-bounty-gold"></i> How It Works
@@ -609,7 +609,7 @@ app.get('*', (c) => {
           <div class="mt-4 text-center font-script text-bounty-brown text-xl">"Fill the calendar. Earn the reward."</div>
         </div>
 
-        <div class="parchment rounded-lg p-5 relative card-shadow">
+        <div class="parchment rounded-lg p-5 relative card-shadow" style="overflow:visible;margin-top:10px;">
           <div class="pin pin-red"></div>
           <h3 class="font-display text-bounty-red text-lg font-black mb-4 flex items-center gap-2">
             <i class="fas fa-shield-alt text-bounty-red"></i> Important Rules
@@ -987,7 +987,7 @@ function renderBoard() {
          </div>\`
       : '';
     return \`
-    <div class="parchment rounded-lg overflow-hidden card-shadow relative \${tilt} hover:rotate-0 hover:scale-[1.02] transition-transform duration-200 \${wasIncreased ? 'bounty-increased' : ''}">
+    <div class="parchment rounded-lg card-shadow relative mt-2 \${tilt} hover:rotate-0 hover:scale-[1.02] transition-transform duration-200 \${wasIncreased ? 'bounty-increased' : ''}" style="overflow:visible;">
       <div class="\${pr.pin} pin"></div>
       <div class="\${pr.ribbonCls} text-xs font-black px-4 py-1.5 text-center tracking-widest">\${pr.badge}</div>
       \${p.photo ? \`<img src="\${p.photo}" alt="\${p.name}" class="w-full h-44 object-cover" onerror="this.style.display='none'" />\` : ''}
