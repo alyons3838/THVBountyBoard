@@ -346,8 +346,11 @@ app.get('*', (c) => {
 
     /* ── Corkboard ── */
     .corkboard {
-      background-color: #c8a870;
-      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0.6'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23g)' opacity='0.18'/%3E%3C/svg%3E");
+      background-color: #c8a060;
+      background-image: url('/static/cork-bg.jpg');
+      background-repeat: repeat;
+      background-size: 380px 380px;
+      background-attachment: local;
     }
 
     /* ── Ribbons ── */
