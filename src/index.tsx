@@ -452,7 +452,7 @@ app.get('*', (c) => {
     <div class="text-center mb-6">
       <div class="flex justify-center mb-3">
         <div style="width:80px;height:100px;border-radius:50%;border:3px solid #1a1208;overflow:hidden;background:white;display:flex;align-items:center;justify-content:center;">
-          <img src="https://www.genspark.ai/api/files/s/QNwq3OwQ" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center;" />
+          <img src="/static/th-logo.png" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center top;" />
         </div>
       </div>
       <div class="font-display text-bounty-dark text-2xl font-black">Admin Access</div>
@@ -478,7 +478,7 @@ app.get('*', (c) => {
       <!-- Logo + wordmark -->
       <div class="flex items-center gap-3 flex-shrink-0">
         <div style="width:56px;height:70px;border-radius:50%;border:2.5px solid #2a1a08;overflow:hidden;background:white;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
-          <img src="https://www.genspark.ai/api/files/s/QNwq3OwQ" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center;" />
+          <img src="/static/th-logo.png" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center top;" />
         </div>
         <div>
           <div class="font-script text-bounty-gold text-2xl leading-none">Thousand Hills</div>
