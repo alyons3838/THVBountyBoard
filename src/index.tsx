@@ -432,13 +432,6 @@ app.get('*', (c) => {
     .cl-decrease { border-left: 3px solid #1a3a5c; background: #f5f8ff; }
     .cl-neutral  { border-left: 3px solid #ccc;    background: #fafafa; }
 
-    /* ── Thousand Hills logo (SVG inline oval) ── */
-    .th-logo-badge {
-      width:52px; height:64px; border-radius:50%; border:2.5px solid #1a1208;
-      background:white; overflow:hidden; display:flex;
-      align-items:center; justify-content:center; flex-shrink:0;
-    }
-
     select, input[type=text], input[type=number], input[type=date],
     input[type=url], input[type=password], textarea { background: #fff; }
 
@@ -457,23 +450,10 @@ app.get('*', (c) => {
   <div class="parchment rounded-2xl p-8 w-full max-w-sm card-shadow relative">
     <div class="pin pin-red" style="top:-7px;left:50%;transform:translateX(-50%)"></div>
     <div class="text-center mb-6">
-      <!-- Thousand Hills inline SVG logo -->
       <div class="flex justify-center mb-3">
-        <svg viewBox="0 0 100 125" width="70" height="88" xmlns="http://www.w3.org/2000/svg">
-          <ellipse cx="50" cy="62" rx="46" ry="58" fill="white" stroke="#000" stroke-width="4"/>
-          <rect x="5" y="72" width="90" height="3" fill="#000" opacity="0.15"/>
-          <!-- hills -->
-          <ellipse cx="28" cy="80" rx="28" ry="14" fill="#1A8F2A"/>
-          <ellipse cx="72" cy="80" rx="28" ry="14" fill="#1A8F2A"/>
-          <!-- golfer silhouette simplified -->
-          <circle cx="50" cy="30" r="10" fill="#FFD200" stroke="#000" stroke-width="1.5"/>
-          <path d="M44 40 Q50 65 54 72" stroke="#000" stroke-width="2" fill="none"/>
-          <path d="M44 40 Q36 52 30 58" stroke="#C80000" stroke-width="5" fill="none" stroke-linecap="round"/>
-          <path d="M54 40 Q62 52 70 55 Q80 50 88 46" stroke="#C80000" stroke-width="4" fill="none" stroke-linecap="round"/>
-          <circle cx="88" cy="45" r="3" fill="#555"/>
-          <!-- text area -->
-          <text x="50" y="102" text-anchor="middle" font-family="Georgia,serif" font-style="italic" font-size="10" fill="#000">Thousand Hills</text>
-        </svg>
+        <div style="width:80px;height:100px;border-radius:50%;border:3px solid #1a1208;overflow:hidden;background:white;display:flex;align-items:center;justify-content:center;">
+          <img src="https://www.genspark.ai/api/files/s/QNwq3OwQ" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center;" />
+        </div>
       </div>
       <div class="font-display text-bounty-dark text-2xl font-black">Admin Access</div>
       <p class="text-gray-500 text-sm mt-1">Enter the admin password to continue</p>
@@ -497,17 +477,8 @@ app.get('*', (c) => {
 
       <!-- Logo + wordmark -->
       <div class="flex items-center gap-3 flex-shrink-0">
-        <div class="th-logo-badge">
-          <svg viewBox="0 0 100 125" width="52" height="64" xmlns="http://www.w3.org/2000/svg">
-            <ellipse cx="50" cy="62" rx="46" ry="58" fill="white" stroke="#000" stroke-width="4"/>
-            <ellipse cx="28" cy="82" rx="30" ry="15" fill="#1A8F2A"/>
-            <ellipse cx="72" cy="82" rx="30" ry="15" fill="#1A8F2A"/>
-            <circle cx="50" cy="28" r="10" fill="#FFD200" stroke="#000" stroke-width="1.5"/>
-            <path d="M44 38 Q36 50 30 56" stroke="#C80000" stroke-width="5" fill="none" stroke-linecap="round"/>
-            <path d="M54 38 Q63 50 72 53 Q81 48 88 44" stroke="#C80000" stroke-width="4" fill="none" stroke-linecap="round"/>
-            <circle cx="88" cy="43" r="3" fill="#444"/>
-            <text x="50" y="104" text-anchor="middle" font-family="Georgia,serif" font-style="italic" font-size="10" fill="#000">Thousand Hills</text>
-          </svg>
+        <div style="width:56px;height:70px;border-radius:50%;border:2.5px solid #2a1a08;overflow:hidden;background:white;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+          <img src="https://www.genspark.ai/api/files/s/QNwq3OwQ" alt="Thousand Hills" style="width:100%;height:100%;object-fit:cover;object-position:center;" />
         </div>
         <div>
           <div class="font-script text-bounty-gold text-2xl leading-none">Thousand Hills</div>
