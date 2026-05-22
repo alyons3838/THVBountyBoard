@@ -543,7 +543,7 @@ app.get('*', (c) => {
 
     /* ── Login overlay ── */
     #login-gate {
-      position:fixed; inset:0; background:rgba(20,10,0,0.93);
+      position:fixed; inset:0; background:#000;
       display:flex; align-items:center; justify-content:center;
       z-index:9999;
     }
@@ -582,7 +582,6 @@ app.get('*', (c) => {
         </div>
       </div>
       <div class="font-display text-bounty-dark text-2xl font-black" id="gate-title">Sign In</div>
-      <p class="text-gray-500 text-xs mt-1" id="gate-subtitle">Sign in to view the Booking Bounty Board</p>
     </div>
     <div id="gate-error" class="hidden mb-3 text-center text-bounty-red text-sm font-semibold bg-red-50 rounded px-3 py-2"></div>
     <div class="space-y-3">
