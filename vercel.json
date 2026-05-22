@@ -1,4 +1,14 @@
 {
+  "framework": "hono",
   "buildCommand": null,
-  "outputDirectory": null
+  "outputDirectory": null,
+  "routes": [
+    {
+      "handle": "filesystem"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/"
+    }
+  ]
 }
