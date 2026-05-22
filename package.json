@@ -5,6 +5,7 @@
     "dev": "vercel dev"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "hono": "^4.12.22"
   }
 }

@@ -1,13 +1,13 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { neon } from '@neondatabase/serverless'
+
+declare const process: { env: Record<string, string | undefined> }
 
 const app = new Hono()
 
 app.use('/api/*', cors())
 // Static files in public/ are served by Vercel's CDN automatically (no serveStatic needed)
-
-// ─── Config ────────────────────────────────────────────────────────────────────
-const ADMIN_PASSWORD = 'bounty2025'   // change before deploy
 
 // ─── User Store ────────────────────────────────────────────────────────────────
 type Role = 'rep' | 'admin'
@@ -144,70 +144,296 @@ const leaderboard: { name: string; total: number; bookings: number }[] = [
   { name: 'Carmen R.', total: 98, bookings: 3 },
 ]
 
+// ─── Database ─────────────────────────────────────────────────────────────────
+const databaseUrl = process.env.DATABASE_URL
+const sql = databaseUrl ? neon(databaseUrl) : null
+let dbReady: Promise<void> | null = null
+
+function requireDb() {
+  if (!sql) throw new Error('DATABASE_URL is not configured')
+  return sql
+}
+
+function mapUser(row: any): User {
+  return {
+    id: row.id,
+    name: row.name,
+    username: row.username,
+    password: row.password,
+    role: row.role,
+    createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+  }
+}
+
+function publicUser(row: any) {
+  const user = mapUser(row)
+  return { id: user.id, name: user.name, username: user.username, role: user.role, createdAt: user.createdAt }
+}
+
+function mapProperty(row: any): Property {
+  return {
+    id: row.id,
+    name: row.name,
+    photo: row.photo || '',
+    priority: row.priority,
+    why: row.why,
+    eligibleDates: row.eligible_dates,
+    minStay: Number(row.min_stay),
+    bountyPerNight: Number(row.bounty_per_night),
+    bonusAmount: Number(row.bonus_amount),
+    bonusCondition: row.bonus_condition || '',
+    cap: Number(row.cap),
+    status: row.status,
+    postedAt: new Date(row.posted_at).toISOString(),
+    bountyIncreasedAt: row.bounty_increased_at ? new Date(row.bounty_increased_at).toISOString() : undefined,
+    previousBounty: row.previous_bounty == null ? undefined : Number(row.previous_bounty),
+  }
+}
+
+function mapBooking(row: any): Booking {
+  return {
+    id: row.id,
+    propertyId: row.property_id,
+    agentName: row.agent_name,
+    guestName: row.guest_name,
+    checkIn: row.check_in,
+    checkOut: row.check_out,
+    nights: Number(row.nights),
+    rate: Number(row.rate),
+    isWeekend: Boolean(row.is_weekend),
+    isLastMinute: Boolean(row.is_last_minute),
+    isLongStay: Boolean(row.is_long_stay),
+    baseBounty: Number(row.base_bounty),
+    bonusEarned: Number(row.bonus_earned),
+    totalEarned: Number(row.total_earned),
+    status: row.status,
+    submittedAt: new Date(row.submitted_at).toISOString(),
+  }
+}
+
+function mapChangelog(row: any): ChangeLog {
+  return {
+    id: row.id,
+    propertyId: row.property_id,
+    propertyName: row.property_name,
+    field: row.field,
+    oldValue: row.old_value,
+    newValue: row.new_value,
+    changedAt: new Date(row.changed_at).toISOString(),
+    isIncrease: Boolean(row.is_increase),
+  }
+}
+
+function mapBonusRules(rows: any[]) {
+  const mapped: typeof bonusRules = {
+    lastMinute: { ...bonusRules.lastMinute },
+    weekend: { ...bonusRules.weekend },
+    longStay: { ...bonusRules.longStay },
+  }
+  for (const row of rows) {
+    if (row.key in mapped) {
+      mapped[row.key as keyof typeof bonusRules] = {
+        amount: Number(row.amount),
+        label: row.label,
+        description: row.description,
+        icon: row.icon,
+      }
+    }
+  }
+  return mapped
+}
+
+function slugify(value: string) {
+  return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+}
+
+async function ensureDb() {
+  if (dbReady) return dbReady
+  dbReady = (async () => {
+    const db = requireDb()
+    await db`CREATE TABLE IF NOT EXISTS app_users (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      username TEXT NOT NULL UNIQUE,
+      password TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('rep', 'admin')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+    await db`CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      name TEXT NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL
+    )`
+    await db`CREATE TABLE IF NOT EXISTS properties (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      photo TEXT NOT NULL DEFAULT '',
+      priority TEXT NOT NULL,
+      why TEXT NOT NULL,
+      eligible_dates TEXT NOT NULL,
+      min_stay INTEGER NOT NULL,
+      bounty_per_night NUMERIC NOT NULL,
+      bonus_amount NUMERIC NOT NULL,
+      bonus_condition TEXT NOT NULL DEFAULT '',
+      cap NUMERIC NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('active', 'filled', 'expired')),
+      posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      bounty_increased_at TIMESTAMPTZ,
+      previous_bounty NUMERIC
+    )`
+    await db`CREATE TABLE IF NOT EXISTS bonus_rules (
+      key TEXT PRIMARY KEY,
+      amount NUMERIC NOT NULL,
+      label TEXT NOT NULL,
+      description TEXT NOT NULL,
+      icon TEXT NOT NULL
+    )`
+    await db`CREATE TABLE IF NOT EXISTS bookings (
+      id TEXT PRIMARY KEY,
+      property_id TEXT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      agent_name TEXT NOT NULL,
+      guest_name TEXT NOT NULL,
+      check_in TEXT NOT NULL,
+      check_out TEXT NOT NULL,
+      nights INTEGER NOT NULL,
+      rate NUMERIC NOT NULL,
+      is_weekend BOOLEAN NOT NULL DEFAULT FALSE,
+      is_last_minute BOOLEAN NOT NULL DEFAULT FALSE,
+      is_long_stay BOOLEAN NOT NULL DEFAULT FALSE,
+      base_bounty NUMERIC NOT NULL,
+      bonus_earned NUMERIC NOT NULL,
+      total_earned NUMERIC NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'cleared', 'disqualified')),
+      submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+    await db`CREATE TABLE IF NOT EXISTS changelog (
+      id TEXT PRIMARY KEY,
+      property_id TEXT NOT NULL,
+      property_name TEXT NOT NULL,
+      field TEXT NOT NULL,
+      old_value TEXT NOT NULL,
+      new_value TEXT NOT NULL,
+      changed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      is_increase BOOLEAN NOT NULL DEFAULT FALSE
+    )`
+    await db`CREATE TABLE IF NOT EXISTS leaderboard_entries (
+      name TEXT PRIMARY KEY,
+      total NUMERIC NOT NULL DEFAULT 0,
+      bookings INTEGER NOT NULL DEFAULT 0
+    )`
+
+    for (const user of users) {
+      await db`INSERT INTO app_users (id, name, username, password, role, created_at)
+        VALUES (${user.id}, ${user.name}, ${user.username}, ${user.password}, ${user.role}, ${user.createdAt})
+        ON CONFLICT (id) DO NOTHING`
+    }
+    for (const property of properties) {
+      await db`INSERT INTO properties (
+        id, name, photo, priority, why, eligible_dates, min_stay, bounty_per_night,
+        bonus_amount, bonus_condition, cap, status, posted_at
+      )
+      VALUES (
+        ${property.id}, ${property.name}, ${property.photo}, ${property.priority}, ${property.why},
+        ${property.eligibleDates}, ${property.minStay}, ${property.bountyPerNight},
+        ${property.bonusAmount}, ${property.bonusCondition}, ${property.cap}, ${property.status}, ${property.postedAt}
+      )
+      ON CONFLICT (id) DO NOTHING`
+    }
+    for (const [key, rule] of Object.entries(bonusRules)) {
+      await db`INSERT INTO bonus_rules (key, amount, label, description, icon)
+        VALUES (${key}, ${rule.amount}, ${rule.label}, ${rule.description}, ${rule.icon})
+        ON CONFLICT (key) DO NOTHING`
+    }
+    for (const entry of leaderboard) {
+      await db`INSERT INTO leaderboard_entries (name, total, bookings)
+        VALUES (${entry.name}, ${entry.total}, ${entry.bookings})
+        ON CONFLICT (name) DO NOTHING`
+    }
+  })()
+  return dbReady
+}
+
 // ─── Auth ──────────────────────────────────────────────────────────────────────
 // Session store: token -> { userId, role, expires }
 interface Session { userId: string; role: Role; name: string; expires: number }
-const sessions: Map<string, Session> = new Map()
-
 function makeToken() {
   return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
 }
 
-function getSession(token: string | undefined): Session | null {
+async function getSession(token: string | undefined): Promise<Session | null> {
   if (!token) return null
-  const s = sessions.get(token)
-  if (!s) return null
-  if (Date.now() > s.expires) { sessions.delete(token); return null }
-  return s
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT user_id, role, name, expires_at FROM sessions WHERE token = ${token}`
+  const row = rows[0]
+  if (!row) return null
+  const expires = new Date(row.expires_at).getTime()
+  if (Date.now() > expires) {
+    await db`DELETE FROM sessions WHERE token = ${token}`
+    return null
+  }
+  return { userId: row.user_id, role: row.role, name: row.name, expires }
 }
 
-function isValidSession(token: string | undefined): boolean {
-  return getSession(token) !== null
-}
-
-function isAdmin(token: string | undefined): boolean {
-  const s = getSession(token)
+async function isAdmin(token: string | undefined): Promise<boolean> {
+  const s = await getSession(token)
   return s !== null && s.role === 'admin'
 }
 
-function requireSession(token: string | undefined) {
-  const s = getSession(token)
-  return s
+async function requireSession(token: string | undefined) {
+  return getSession(token)
 }
 
 app.post('/api/auth/login', async (c) => {
+  await ensureDb()
+  const db = requireDb()
   const { username, password } = await c.req.json<{ username: string; password: string }>()
-  const user = users.find(u => u.username === username.toLowerCase().trim() && u.password === password)
+  const rows = await db`SELECT * FROM app_users WHERE username = ${username.toLowerCase().trim()} AND password = ${password}`
+  const user = rows[0] ? mapUser(rows[0]) : null
   if (!user) return c.json({ error: 'Invalid username or password' }, 401)
   const token = makeToken()
-  sessions.set(token, { userId: user.id, role: user.role, name: user.name, expires: Date.now() + 8 * 60 * 60 * 1000 })
+  const expires = Date.now() + 8 * 60 * 60 * 1000
+  await db`INSERT INTO sessions (token, user_id, role, name, expires_at)
+    VALUES (${token}, ${user.id}, ${user.role}, ${user.name}, ${new Date(expires).toISOString()})`
   return c.json({ token, role: user.role, name: user.name })
 })
 
 app.post('/api/auth/logout', async (c) => {
   const token = c.req.header('x-auth-token')
-  if (token) sessions.delete(token)
+  if (token) {
+    await ensureDb()
+    const db = requireDb()
+    await db`DELETE FROM sessions WHERE token = ${token}`
+  }
   return c.json({ ok: true })
 })
 
-app.get('/api/auth/check', (c) => {
+app.get('/api/auth/check', async (c) => {
   const token = c.req.header('x-auth-token')
-  const s = getSession(token)
+  const s = await getSession(token)
   return c.json(s ? { valid: true, role: s.role, name: s.name } : { valid: false })
 })
 
 // ─── Users API (admin only) ─────────────────────────────────────────────────────
-app.get('/api/users', (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  return c.json(users.map(u => ({ id: u.id, name: u.name, username: u.username, role: u.role, createdAt: u.createdAt })))
+app.get('/api/users', async (c) => {
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT id, name, username, password, role, created_at FROM app_users ORDER BY created_at ASC`
+  return c.json(rows.map(publicUser))
 })
 
 app.post('/api/users', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
   const body = await c.req.json<{ name: string; username: string; password: string; role: Role }>()
   if (!body.name || !body.username || !body.password) return c.json({ error: 'name, username, password required' }, 400)
   const slug = body.username.toLowerCase().trim().replace(/\s+/g, '')
-  if (users.find(u => u.username === slug)) return c.json({ error: 'Username already taken' }, 409)
+  const existing = await db`SELECT id FROM app_users WHERE username = ${slug}`
+  if (existing.length) return c.json({ error: 'Username already taken' }, 409)
   const newUser: User = {
     id: 'u-' + Date.now(),
     name: body.name.trim(),
@@ -216,167 +442,229 @@ app.post('/api/users', async (c) => {
     role: body.role === 'admin' ? 'admin' : 'rep',
     createdAt: new Date().toISOString(),
   }
-  users.push(newUser)
+  await db`INSERT INTO app_users (id, name, username, password, role, created_at)
+    VALUES (${newUser.id}, ${newUser.name}, ${newUser.username}, ${newUser.password}, ${newUser.role}, ${newUser.createdAt})`
   return c.json({ id: newUser.id, name: newUser.name, username: newUser.username, role: newUser.role }, 201)
 })
 
 app.patch('/api/users/:id', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const user = users.find(u => u.id === c.req.param('id'))
-  if (!user) return c.json({ error: 'Not found' }, 404)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const current = await db`SELECT * FROM app_users WHERE id = ${c.req.param('id')}`
+  if (!current.length) return c.json({ error: 'Not found' }, 404)
+  const user = mapUser(current[0])
   const body = await c.req.json<{ name?: string; password?: string; role?: Role }>()
   if (body.name)     user.name     = body.name.trim()
   if (body.password) user.password = body.password
   if (body.role)     user.role     = body.role === 'admin' ? 'admin' : 'rep'
+  await db`UPDATE app_users SET name = ${user.name}, password = ${user.password}, role = ${user.role} WHERE id = ${user.id}`
   return c.json({ id: user.id, name: user.name, username: user.username, role: user.role })
 })
 
 app.delete('/api/users/:id', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const idx = users.findIndex(u => u.id === c.req.param('id'))
-  if (idx === -1) return c.json({ error: 'Not found' }, 404)
-  if (users[idx].role === 'admin' && users.filter(u => u.role === 'admin').length === 1)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM app_users WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
+  const user = mapUser(rows[0])
+  const admins = await db`SELECT count(*)::int AS count FROM app_users WHERE role = 'admin'`
+  if (user.role === 'admin' && Number(admins[0].count) <= 1)
     return c.json({ error: 'Cannot remove last admin' }, 400)
-  users.splice(idx, 1)
+  await db`DELETE FROM app_users WHERE id = ${user.id}`
   return c.json({ ok: true })
 })
 
 // ─── Properties API ────────────────────────────────────────────────────────────
-app.get('/api/properties', (c) => {
-  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  return c.json(properties)
+app.get('/api/properties', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM properties ORDER BY posted_at ASC`
+  return c.json(rows.map(mapProperty))
 })
 
-app.get('/api/properties/:id', (c) => {
-  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const prop = properties.find((p) => p.id === c.req.param('id'))
-  if (!prop) return c.json({ error: 'Not found' }, 404)
-  return c.json(prop)
+app.get('/api/properties/:id', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM properties WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
+  return c.json(mapProperty(rows[0]))
 })
 
 app.post('/api/properties', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
   const body = await c.req.json<Omit<Property, 'id' | 'postedAt'>>()
   const newProp: Property = {
     ...body,
-    id: body.name.toLowerCase().replace(/\s+/g, '-') + '-' + Date.now(),
+    id: slugify(body.name) + '-' + Date.now(),
     postedAt: new Date().toISOString(),
   }
-  properties.push(newProp)
+  await db`INSERT INTO properties (
+    id, name, photo, priority, why, eligible_dates, min_stay, bounty_per_night,
+    bonus_amount, bonus_condition, cap, status, posted_at
+  ) VALUES (
+    ${newProp.id}, ${newProp.name}, ${newProp.photo || ''}, ${newProp.priority}, ${newProp.why},
+    ${newProp.eligibleDates}, ${newProp.minStay}, ${newProp.bountyPerNight}, ${newProp.bonusAmount},
+    ${newProp.bonusCondition || ''}, ${newProp.cap}, ${newProp.status}, ${newProp.postedAt}
+  )`
   return c.json(newProp, 201)
 })
 
 // Full property update (inline edit)
 app.patch('/api/properties/:id', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const prop = properties.find((p) => p.id === c.req.param('id'))
-  if (!prop) return c.json({ error: 'Not found' }, 404)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM properties WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
+  const prop = mapProperty(rows[0])
 
   const updates = await c.req.json<Partial<Property>>()
   const now = new Date().toISOString()
   const moneyFields: (keyof Property)[] = ['bountyPerNight', 'bonusAmount', 'cap']
+  const next = { ...prop, ...updates }
 
   // Track changes
   for (const [key, newVal] of Object.entries(updates)) {
     const k = key as keyof Property
-    const oldVal = prop[k]
+    const oldVal = prop[k] as string | number | undefined
     if (oldVal === newVal) continue
 
     const isMoneyField = moneyFields.includes(k)
     const isIncrease = isMoneyField &&
       typeof newVal === 'number' && typeof oldVal === 'number' && newVal > oldVal
 
-    changelog.unshift({
-      id: 'log-' + Date.now() + '-' + Math.random().toString(36).slice(2),
-      propertyId: prop.id,
-      propertyName: prop.name,
-      field: key,
-      oldValue: oldVal as string | number,
-      newValue: newVal as string | number,
-      changedAt: now,
-      isIncrease,
-    })
+    await db`INSERT INTO changelog (id, property_id, property_name, field, old_value, new_value, changed_at, is_increase)
+      VALUES (
+        ${'log-' + Date.now() + '-' + Math.random().toString(36).slice(2)},
+        ${prop.id}, ${prop.name}, ${key}, ${String(oldVal ?? '')}, ${String(newVal ?? '')}, ${now}, ${isIncrease}
+      )`
 
     // Flag on the property itself so the board can highlight it
     if (k === 'bountyPerNight' && isIncrease) {
-      prop.bountyIncreasedAt = now
-      prop.previousBounty = oldVal as number
+      next.bountyIncreasedAt = now
+      next.previousBounty = oldVal as number
     }
   }
 
-  Object.assign(prop, updates)
-  return c.json(prop)
+  await db`UPDATE properties SET
+    name = ${next.name},
+    photo = ${next.photo || ''},
+    priority = ${next.priority},
+    why = ${next.why},
+    eligible_dates = ${next.eligibleDates},
+    min_stay = ${next.minStay},
+    bounty_per_night = ${next.bountyPerNight},
+    bonus_amount = ${next.bonusAmount},
+    bonus_condition = ${next.bonusCondition || ''},
+    cap = ${next.cap},
+    status = ${next.status},
+    bounty_increased_at = ${next.bountyIncreasedAt || null},
+    previous_bounty = ${next.previousBounty ?? null}
+    WHERE id = ${prop.id}`
+  const updated = await db`SELECT * FROM properties WHERE id = ${prop.id}`
+  return c.json(mapProperty(updated[0]))
 })
 
 app.patch('/api/properties/:id/status', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const prop = properties.find((p) => p.id === c.req.param('id'))
-  if (!prop) return c.json({ error: 'Not found' }, 404)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM properties WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
   const { status } = await c.req.json<{ status: Status }>()
-  prop.status = status
-  return c.json(prop)
+  await db`UPDATE properties SET status = ${status} WHERE id = ${c.req.param('id')}`
+  const updated = await db`SELECT * FROM properties WHERE id = ${c.req.param('id')}`
+  return c.json(mapProperty(updated[0]))
 })
 
-app.delete('/api/properties/:id', (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const idx = properties.findIndex((p) => p.id === c.req.param('id'))
-  if (idx === -1) return c.json({ error: 'Not found' }, 404)
-  properties.splice(idx, 1)
+app.delete('/api/properties/:id', async (c) => {
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT id FROM properties WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
+  await db`DELETE FROM properties WHERE id = ${c.req.param('id')}`
   return c.json({ success: true })
 })
 
 // ─── Bonus Rules API ──────────────────────────────────────────────────────────
-app.get('/api/bonus-rules', (c) => {
-  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  return c.json(bonusRules)
+app.get('/api/bonus-rules', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM bonus_rules`
+  return c.json(mapBonusRules(rows))
 })
 
 app.patch('/api/bonus-rules', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
   const body = await c.req.json<Partial<typeof bonusRules>>()
-  if (body.lastMinute) {
-    if (typeof body.lastMinute.amount      === 'number') bonusRules.lastMinute.amount      = body.lastMinute.amount
-    if (typeof body.lastMinute.label       === 'string') bonusRules.lastMinute.label       = body.lastMinute.label
-    if (typeof body.lastMinute.description === 'string') bonusRules.lastMinute.description = body.lastMinute.description
+  for (const key of Object.keys(bonusRules) as (keyof typeof bonusRules)[]) {
+    const existing = (await db`SELECT * FROM bonus_rules WHERE key = ${key}`)[0]
+    const current = existing ? mapBonusRules([existing])[key] : bonusRules[key]
+    const incoming = body[key]
+    const next = {
+      amount: typeof incoming?.amount === 'number' ? incoming.amount : current.amount,
+      label: typeof incoming?.label === 'string' ? incoming.label : current.label,
+      description: typeof incoming?.description === 'string' ? incoming.description : current.description,
+      icon: current.icon,
+    }
+    await db`INSERT INTO bonus_rules (key, amount, label, description, icon)
+      VALUES (${key}, ${next.amount}, ${next.label}, ${next.description}, ${next.icon})
+      ON CONFLICT (key) DO UPDATE SET
+        amount = EXCLUDED.amount,
+        label = EXCLUDED.label,
+        description = EXCLUDED.description,
+        icon = EXCLUDED.icon`
   }
-  if (body.weekend) {
-    if (typeof body.weekend.amount      === 'number') bonusRules.weekend.amount      = body.weekend.amount
-    if (typeof body.weekend.label       === 'string') bonusRules.weekend.label       = body.weekend.label
-    if (typeof body.weekend.description === 'string') bonusRules.weekend.description = body.weekend.description
-  }
-  if (body.longStay) {
-    if (typeof body.longStay.amount      === 'number') bonusRules.longStay.amount      = body.longStay.amount
-    if (typeof body.longStay.label       === 'string') bonusRules.longStay.label       = body.longStay.label
-    if (typeof body.longStay.description === 'string') bonusRules.longStay.description = body.longStay.description
-  }
-  return c.json(bonusRules)
+  const rows = await db`SELECT * FROM bonus_rules`
+  return c.json(mapBonusRules(rows))
 })
 
 // ─── Changelog API ─────────────────────────────────────────────────────────────
-app.get('/api/changelog', (c) => {
-  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  return c.json(changelog.slice(0, 100)) // most recent 100
+app.get('/api/changelog', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM changelog ORDER BY changed_at DESC LIMIT 100`
+  return c.json(rows.map(mapChangelog))
 })
 
 // ─── Bookings API ──────────────────────────────────────────────────────────────
-app.get('/api/bookings', (c) => {
-  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  return c.json(bookings)
+app.get('/api/bookings', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM bookings ORDER BY submitted_at ASC`
+  return c.json(rows.map(mapBooking))
 })
 
 app.post('/api/bookings', async (c) => {
-  const session = requireSession(c.req.header('x-auth-token'))
+  const session = await requireSession(c.req.header('x-auth-token'))
   if (!session) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
   const body = await c.req.json<Omit<Booking, 'id' | 'submittedAt' | 'baseBounty' | 'bonusEarned' | 'totalEarned' | 'status'>>()
-  const prop = properties.find((p) => p.id === body.propertyId)
-  if (!prop) return c.json({ error: 'Property not found' }, 404)
+  const propRows = await db`SELECT * FROM properties WHERE id = ${body.propertyId}`
+  if (!propRows.length) return c.json({ error: 'Property not found' }, 404)
+  const prop = mapProperty(propRows[0])
+  const rules = mapBonusRules(await db`SELECT * FROM bonus_rules`)
 
   const baseBounty = Math.min(body.nights * prop.bountyPerNight, prop.cap)
   let bonusEarned = 0
-  if (body.isLastMinute) bonusEarned += bonusRules.lastMinute.amount
-  if (body.isWeekend)    bonusEarned += bonusRules.weekend.amount
-  if (body.isLongStay)   bonusEarned += bonusRules.longStay.amount
+  if (body.isLastMinute) bonusEarned += rules.lastMinute.amount
+  if (body.isWeekend)    bonusEarned += rules.weekend.amount
+  if (body.isLongStay)   bonusEarned += rules.longStay.amount
   const totalEarned = baseBounty + bonusEarned
+  const submittedAt = new Date().toISOString()
 
   const booking: Booking = {
     ...body,
@@ -386,34 +674,47 @@ app.post('/api/bookings', async (c) => {
     bonusEarned,
     totalEarned,
     status: 'pending',
-    submittedAt: new Date().toISOString(),
+    submittedAt,
   }
-  bookings.push(booking)
+  await db`INSERT INTO bookings (
+    id, property_id, agent_name, guest_name, check_in, check_out, nights, rate,
+    is_weekend, is_last_minute, is_long_stay, base_bounty, bonus_earned,
+    total_earned, status, submitted_at
+  ) VALUES (
+    ${booking.id}, ${booking.propertyId}, ${booking.agentName}, ${booking.guestName},
+    ${booking.checkIn}, ${booking.checkOut}, ${booking.nights}, ${booking.rate},
+    ${booking.isWeekend}, ${booking.isLastMinute}, ${booking.isLongStay},
+    ${booking.baseBounty}, ${booking.bonusEarned}, ${booking.totalEarned},
+    ${booking.status}, ${booking.submittedAt}
+  )`
 
-  const existing = leaderboard.find((l) => l.name === session.name)
-  if (existing) {
-    existing.total += totalEarned
-    existing.bookings += 1
-  } else {
-    leaderboard.push({ name: session.name, total: totalEarned, bookings: 1 })
-  }
-  leaderboard.sort((a, b) => b.total - a.total)
+  await db`INSERT INTO leaderboard_entries (name, total, bookings)
+    VALUES (${session.name}, ${totalEarned}, 1)
+    ON CONFLICT (name) DO UPDATE SET
+      total = leaderboard_entries.total + EXCLUDED.total,
+      bookings = leaderboard_entries.bookings + 1`
 
   return c.json(booking, 201)
 })
 
 app.patch('/api/bookings/:id/status', async (c) => {
-  if (!isAdmin(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  const booking = bookings.find((b) => b.id === c.req.param('id'))
-  if (!booking) return c.json({ error: 'Not found' }, 404)
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM bookings WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
   const { status } = await c.req.json<{ status: Booking['status'] }>()
-  booking.status = status
-  return c.json(booking)
+  await db`UPDATE bookings SET status = ${status} WHERE id = ${c.req.param('id')}`
+  const updated = await db`SELECT * FROM bookings WHERE id = ${c.req.param('id')}`
+  return c.json(mapBooking(updated[0]))
 })
 
-app.get('/api/leaderboard', (c) => {
-  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
-  return c.json(leaderboard)
+app.get('/api/leaderboard', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT name, total, bookings FROM leaderboard_entries ORDER BY total DESC`
+  return c.json(rows.map((row: any) => ({ name: row.name, total: Number(row.total), bookings: Number(row.bookings) })))
 })
 
 // ─── Frontend ──────────────────────────────────────────────────────────────────
