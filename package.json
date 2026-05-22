@@ -3,11 +3,9 @@
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
-    "build": "echo 'Vercel handles the build'",
-    "start": "node src/index.tsx"
+    "build": "echo 'Vercel builds from source automatically'"
   },
   "dependencies": {
-    "@hono/node-server": "^2.0.3",
     "hono": "^4.12.12"
   },
   "devDependencies": {
