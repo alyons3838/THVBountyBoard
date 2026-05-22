@@ -2,8 +2,7 @@
   "name": "webapp",
   "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "build": "echo 'Vercel builds from source automatically'"
+    "dev": "vercel dev"
   },
   "dependencies": {
     "hono": "^4.12.12"
