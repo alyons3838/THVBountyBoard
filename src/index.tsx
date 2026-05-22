@@ -1,11 +1,13 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { serveStatic } from 'hono/cloudflare-workers'
+import { serveStatic } from '@hono/node-server/serve-static'
 
 const app = new Hono()
 
 app.use('/api/*', cors())
-app.use('/static/*', serveStatic({ root: './' }))
+// Static files in public/ are served by Vercel's CDN automatically.
+// The serveStatic below covers local dev via `vercel dev`.
+app.use('/static/*', serveStatic({ root: './public' }))
 
 // ─── Config ────────────────────────────────────────────────────────────────────
 const ADMIN_PASSWORD = 'bounty2025'   // change before deploy

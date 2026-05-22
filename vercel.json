@@ -1,0 +1,6 @@
+{
+  "framework": "hono",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/src/index" }
+  ]
+}
