@@ -170,6 +170,11 @@ function isAdmin(token: string | undefined): boolean {
   return s !== null && s.role === 'admin'
 }
 
+function requireSession(token: string | undefined) {
+  const s = getSession(token)
+  return s
+}
+
 app.post('/api/auth/login', async (c) => {
   const { username, password } = await c.req.json<{ username: string; password: string }>()
   const user = users.find(u => u.username === username.toLowerCase().trim() && u.password === password)
@@ -238,10 +243,12 @@ app.delete('/api/users/:id', async (c) => {
 
 // ─── Properties API ────────────────────────────────────────────────────────────
 app.get('/api/properties', (c) => {
+  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   return c.json(properties)
 })
 
 app.get('/api/properties/:id', (c) => {
+  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   const prop = properties.find((p) => p.id === c.req.param('id'))
   if (!prop) return c.json({ error: 'Not found' }, 404)
   return c.json(prop)
@@ -320,6 +327,7 @@ app.delete('/api/properties/:id', (c) => {
 
 // ─── Bonus Rules API ──────────────────────────────────────────────────────────
 app.get('/api/bonus-rules', (c) => {
+  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   return c.json(bonusRules)
 })
 
@@ -346,15 +354,19 @@ app.patch('/api/bonus-rules', async (c) => {
 
 // ─── Changelog API ─────────────────────────────────────────────────────────────
 app.get('/api/changelog', (c) => {
+  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   return c.json(changelog.slice(0, 100)) // most recent 100
 })
 
 // ─── Bookings API ──────────────────────────────────────────────────────────────
 app.get('/api/bookings', (c) => {
+  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   return c.json(bookings)
 })
 
 app.post('/api/bookings', async (c) => {
+  const session = requireSession(c.req.header('x-auth-token'))
+  if (!session) return c.json({ error: 'Unauthorized' }, 401)
   const body = await c.req.json<Omit<Booking, 'id' | 'submittedAt' | 'baseBounty' | 'bonusEarned' | 'totalEarned' | 'status'>>()
   const prop = properties.find((p) => p.id === body.propertyId)
   if (!prop) return c.json({ error: 'Property not found' }, 404)
@@ -368,6 +380,7 @@ app.post('/api/bookings', async (c) => {
 
   const booking: Booking = {
     ...body,
+    agentName: session.name,
     id: 'booking-' + Date.now(),
     baseBounty,
     bonusEarned,
@@ -377,12 +390,12 @@ app.post('/api/bookings', async (c) => {
   }
   bookings.push(booking)
 
-  const existing = leaderboard.find((l) => l.name === body.agentName)
+  const existing = leaderboard.find((l) => l.name === session.name)
   if (existing) {
     existing.total += totalEarned
     existing.bookings += 1
   } else {
-    leaderboard.push({ name: body.agentName, total: totalEarned, bookings: 1 })
+    leaderboard.push({ name: session.name, total: totalEarned, bookings: 1 })
   }
   leaderboard.sort((a, b) => b.total - a.total)
 
@@ -399,6 +412,7 @@ app.patch('/api/bookings/:id/status', async (c) => {
 })
 
 app.get('/api/leaderboard', (c) => {
+  if (!requireSession(c.req.header('x-auth-token'))) return c.json({ error: 'Unauthorized' }, 401)
   return c.json(leaderboard)
 })
 
@@ -558,7 +572,7 @@ app.get('*', (c) => {
 <body class="min-h-screen text-gray-800">
 
 <!-- ════════════ LOGIN GATE (rep + admin) ════════════ -->
-<div id="login-gate" class="hidden">
+<div id="login-gate">
   <div class="parchment rounded-2xl p-8 w-full max-w-sm card-shadow relative" style="overflow:visible;">
     <div class="pin pin-red" style="top:-8px;left:50%;transform:translateX(-50%)"></div>
     <div class="text-center mb-5">
@@ -568,7 +582,7 @@ app.get('*', (c) => {
         </div>
       </div>
       <div class="font-display text-bounty-dark text-2xl font-black" id="gate-title">Sign In</div>
-      <p class="text-gray-500 text-xs mt-1" id="gate-subtitle">Sign in to log bookings or access admin tools</p>
+      <p class="text-gray-500 text-xs mt-1" id="gate-subtitle">Sign in to view the Booking Bounty Board</p>
     </div>
     <div id="gate-error" class="hidden mb-3 text-center text-bounty-red text-sm font-semibold bg-red-50 rounded px-3 py-2"></div>
     <div class="space-y-3">
@@ -586,10 +600,6 @@ app.get('*', (c) => {
     <button onclick="doLogin()"
       class="mt-4 w-full py-2.5 bg-bounty-dark text-white font-bold rounded uppercase tracking-wide hover:bg-bounty-brown transition-all text-sm">
       <i class="fas fa-sign-in-alt mr-1.5"></i> Sign In
-    </button>
-    <button onclick="closeLoginGate()"
-      class="mt-2 w-full py-1.5 text-gray-400 text-xs hover:text-gray-600 transition-colors">
-      Cancel
     </button>
   </div>
 </div>
@@ -1068,8 +1078,36 @@ function openLoginGate(target) {
 }
 
 function closeLoginGate() {
+  if (!authToken) return;
   document.getElementById('login-gate').classList.add('hidden');
   _loginTarget = null;
+}
+
+function clearStoredSession() {
+  authToken = null; authRole = null; authName = null;
+  sessionStorage.removeItem('authToken');
+  sessionStorage.removeItem('authRole');
+  sessionStorage.removeItem('authName');
+}
+
+async function verifyStoredSession() {
+  if (!authToken) return false;
+  try {
+    const res = await fetch('/api/auth/check', { headers:{'x-auth-token': authToken} });
+    const data = await res.json();
+    if (!data.valid) {
+      clearStoredSession();
+      return false;
+    }
+    authRole = data.role;
+    authName = data.name;
+    sessionStorage.setItem('authRole', data.role);
+    sessionStorage.setItem('authName', data.name);
+    return true;
+  } catch {
+    clearStoredSession();
+    return false;
+  }
 }
 
 async function doLogin() {
@@ -1099,6 +1137,9 @@ async function doLogin() {
   sessionStorage.setItem('authName',  name);
   document.getElementById('login-gate').classList.add('hidden');
   updateUserChip();
+  await loadAppData();
+  renderBonusPills();
+  populatePropertySelect();
   // Navigate to where the user wanted to go
   const target = _loginTarget; _loginTarget = null;
   if (target === 'submit') { showTab('submit'); }
@@ -1111,12 +1152,9 @@ async function doLogout() {
   if (authToken) {
     await fetch('/api/auth/logout', { method:'POST', headers:{'x-auth-token': authToken} });
   }
-  authToken = null; authRole = null; authName = null;
-  sessionStorage.removeItem('authToken');
-  sessionStorage.removeItem('authRole');
-  sessionStorage.removeItem('authName');
+  clearStoredSession();
   updateUserChip();
-  showTab('board');
+  openLoginGate('general');
 }
 
 function updateUserChip() {
@@ -1160,6 +1198,7 @@ function gotoAdmin() {
 //  NAVIGATION
 // ════════════════════════════════════════════════════════════
 function showTab(name) {
+  if (!authToken) { openLoginGate(name === 'admin' ? 'admin' : name === 'submit' ? 'submit' : 'general'); return; }
   document.querySelectorAll('.view').forEach(v => v.classList.add('hidden'));
   document.querySelectorAll('.nav-btn').forEach(b => {
     b.classList.remove('nav-active');
@@ -1182,24 +1221,43 @@ function showTab(name) {
 // ════════════════════════════════════════════════════════════
 //  FETCH HELPERS
 // ════════════════════════════════════════════════════════════
+function authHeaders(extra = {}) {
+  return { ...extra, 'x-auth-token': authToken || '' };
+}
+
+async function authedJson(url) {
+  const r = await fetch(url, { headers: authHeaders() });
+  if (r.status === 401) {
+    clearStoredSession();
+    updateUserChip();
+    openLoginGate('general');
+    throw new Error('Unauthorized');
+  }
+  return r.json();
+}
+
+async function loadAppData() {
+  await Promise.all([fetchProperties(), fetchBookings(), fetchLeaderboard(), fetchChangelog(), fetchBonusRules()]);
+}
+
 async function fetchProperties() {
-  const r = await fetch('/api/properties'); allProperties = await r.json();
+  allProperties = await authedJson('/api/properties');
 }
 async function fetchBookings() {
-  const r = await fetch('/api/bookings'); allBookings = await r.json();
+  allBookings = await authedJson('/api/bookings');
 }
 async function fetchLeaderboard() {
-  const r = await fetch('/api/leaderboard'); allLeaderboard = await r.json();
+  allLeaderboard = await authedJson('/api/leaderboard');
 }
 async function fetchChangelog() {
-  const r = await fetch('/api/changelog'); allChangelog = await r.json();
+  allChangelog = await authedJson('/api/changelog');
 }
 async function fetchBonusRules() {
-  const r = await fetch('/api/bonus-rules'); allBonusRules = await r.json();
+  allBonusRules = await authedJson('/api/bonus-rules');
 }
 async function fetchUsers() {
   if (!authToken || authRole !== 'admin') return;
-  const r = await fetch('/api/users', { headers:{'x-auth-token': authToken} });
+  const r = await fetch('/api/users', { headers:authHeaders() });
   if (r.ok) allUsers = await r.json();
 }
 
@@ -1273,7 +1331,7 @@ async function saveBonusRules() {
   };
   const res = await fetch('/api/bonus-rules', {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify(payload),
   });
   if (!res.ok) { alert('Save failed -- are you still logged in?'); return; }
@@ -1465,7 +1523,7 @@ async function addUser() {
   if (!name || !username || !password) { msg.textContent='Fill in all fields.'; msg.className='text-xs text-bounty-red font-semibold'; msg.classList.remove('hidden'); return; }
   const res = await fetch('/api/users', {
     method:'POST',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({ name, username, password, role }),
   });
   const data = await res.json();
@@ -1481,7 +1539,7 @@ async function promptResetPassword(userId, userName) {
   if (!newPw || !newPw.trim()) return;
   const res = await fetch(\`/api/users/\${userId}\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({ password: newPw.trim() }),
   });
   if (res.ok) alert(\`Password updated for \${userName}.\`);
@@ -1491,7 +1549,7 @@ async function promptResetPassword(userId, userName) {
 async function deleteUser(userId, userName) {
   if (!confirm(\`Remove \${userName}? They will be signed out immediately.\`)) return;
   const res = await fetch(\`/api/users/\${userId}\`, {
-    method:'DELETE', headers:{'x-auth-token': authToken||''}
+    method:'DELETE', headers:authHeaders()
   });
   if (!res.ok) { const d = await res.json(); alert(d.error || 'Delete failed.'); return; }
   await fetchUsers(); renderAdminUsers();
@@ -1605,7 +1663,7 @@ async function savePropertyEdit(id) {
   });
   const res = await fetch(\`/api/properties/\${id}\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify(updates),
   });
   if (res.status === 401) { alert('Session expired. Please log in again.'); doLogout(); return; }
@@ -1723,7 +1781,7 @@ async function submitBooking(e) {
   }
   const res = await fetch('/api/bookings', {
     method:'POST',
-    headers:{'Content-Type':'application/json'},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({
       propertyId: propId,
       agentName:  document.getElementById('f-agent').value,
@@ -1758,7 +1816,7 @@ async function addProperty(e) {
   e.preventDefault();
   const res = await fetch('/api/properties', {
     method:'POST',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({
       name:           document.getElementById('a-name').value,
       priority:       document.getElementById('a-priority').value,
@@ -1783,7 +1841,7 @@ async function addProperty(e) {
 async function updatePropStatus(id, status) {
   await fetch(\`/api/properties/\${id}/status\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({status}),
   });
   await fetchProperties();
@@ -1794,7 +1852,7 @@ async function updatePropStatus(id, status) {
 async function deleteProp(id) {
   if (!confirm('Remove this property from the board?')) return;
   await fetch(\`/api/properties/\${id}\`, {
-    method:'DELETE', headers:{'x-auth-token': authToken||''}
+    method:'DELETE', headers:authHeaders()
   });
   await fetchProperties();
   renderAdmin();
@@ -1805,7 +1863,7 @@ async function deleteProp(id) {
 async function updateBookingStatus(id, status) {
   await fetch(\`/api/bookings/\${id}/status\`, {
     method:'PATCH',
-    headers:{'Content-Type':'application/json','x-auth-token': authToken||''},
+    headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({status}),
   });
   await fetchBookings();
@@ -1816,11 +1874,14 @@ async function updateBookingStatus(id, status) {
 //  INIT
 // ════════════════════════════════════════════════════════════
 async function init() {
-  await Promise.all([fetchProperties(), fetchBookings(), fetchLeaderboard(), fetchChangelog(), fetchBonusRules()]);
-  // Restore session from sessionStorage
+  const signedIn = await verifyStoredSession();
   updateUserChip();
-  // If admin was previously logged in, pre-load users
-  if (authToken && authRole === 'admin') {
+  if (!signedIn) {
+    openLoginGate('general');
+    return;
+  }
+  await loadAppData();
+  if (authRole === 'admin') {
     await fetchUsers();
   }
   renderBoard();
