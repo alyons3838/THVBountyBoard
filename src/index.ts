@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
-import { neon } from '@neondatabase/serverless'
+import postgres from 'postgres'
+import bcrypt from 'bcryptjs'
 
 declare const process: { env: Record<string, string | undefined> }
 
@@ -22,9 +23,6 @@ interface User {
 
 const users: User[] = [
   { id: 'u-admin', name: 'Admin',      username: 'admin',   password: 'bounty2025', role: 'admin', createdAt: new Date().toISOString() },
-  { id: 'u-sarah', name: 'Sarah M.',   username: 'sarah',   password: 'rep1234',    role: 'rep',   createdAt: new Date().toISOString() },
-  { id: 'u-jake',  name: 'Jake T.',    username: 'jake',    password: 'rep1234',    role: 'rep',   createdAt: new Date().toISOString() },
-  { id: 'u-carmen',name: 'Carmen R.',  username: 'carmen',  password: 'rep1234',    role: 'rep',   createdAt: new Date().toISOString() },
 ]
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -138,15 +136,11 @@ const bonusRules = {
   longStay:   { amount: 15, label: 'LONG STAY LEGEND', description: '5+ nights',        icon: 'moon' },
 }
 
-const leaderboard: { name: string; total: number; bookings: number }[] = [
-  { name: 'Sarah M.', total: 187, bookings: 6 },
-  { name: 'Jake T.', total: 142, bookings: 5 },
-  { name: 'Carmen R.', total: 98, bookings: 3 },
-]
+const leaderboard: { name: string; total: number; bookings: number }[] = []
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 const databaseUrl = process.env.DATABASE_URL
-const sql = databaseUrl ? neon(databaseUrl) : null
+const sql = databaseUrl ? postgres(databaseUrl, { ssl: 'require', max: 1 }) : null
 let dbReady: Promise<void> | null = null
 
 function requireDb() {
@@ -247,6 +241,19 @@ function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
 
+function isBcryptHash(value: string) {
+  return /^\$2[aby]\$\d{2}\$/.test(value)
+}
+
+async function hashPassword(password: string) {
+  return bcrypt.hash(password, 12)
+}
+
+async function verifyPassword(password: string, storedPassword: string) {
+  if (isBcryptHash(storedPassword)) return bcrypt.compare(password, storedPassword)
+  return password === storedPassword
+}
+
 async function ensureDb() {
   if (dbReady) return dbReady
   dbReady = (async () => {
@@ -325,8 +332,9 @@ async function ensureDb() {
     )`
 
     for (const user of users) {
+      const passwordHash = await hashPassword(user.password)
       await db`INSERT INTO app_users (id, name, username, password, role, created_at)
-        VALUES (${user.id}, ${user.name}, ${user.username}, ${user.password}, ${user.role}, ${user.createdAt})
+        VALUES (${user.id}, ${user.name}, ${user.username}, ${passwordHash}, ${user.role}, ${user.createdAt})
         ON CONFLICT (id) DO NOTHING`
     }
     for (const property of properties) {
@@ -390,9 +398,12 @@ app.post('/api/auth/login', async (c) => {
   await ensureDb()
   const db = requireDb()
   const { username, password } = await c.req.json<{ username: string; password: string }>()
-  const rows = await db`SELECT * FROM app_users WHERE username = ${username.toLowerCase().trim()} AND password = ${password}`
+  const rows = await db`SELECT * FROM app_users WHERE username = ${username.toLowerCase().trim()}`
   const user = rows[0] ? mapUser(rows[0]) : null
-  if (!user) return c.json({ error: 'Invalid username or password' }, 401)
+  if (!user || !(await verifyPassword(password, user.password))) return c.json({ error: 'Invalid username or password' }, 401)
+  if (!isBcryptHash(user.password)) {
+    await db`UPDATE app_users SET password = ${await hashPassword(password)} WHERE id = ${user.id}`
+  }
   const token = makeToken()
   const expires = Date.now() + 8 * 60 * 60 * 1000
   await db`INSERT INTO sessions (token, user_id, role, name, expires_at)
@@ -438,7 +449,7 @@ app.post('/api/users', async (c) => {
     id: 'u-' + Date.now(),
     name: body.name.trim(),
     username: slug,
-    password: body.password,
+    password: await hashPassword(body.password),
     role: body.role === 'admin' ? 'admin' : 'rep',
     createdAt: new Date().toISOString(),
   }
@@ -456,7 +467,7 @@ app.patch('/api/users/:id', async (c) => {
   const user = mapUser(current[0])
   const body = await c.req.json<{ name?: string; password?: string; role?: Role }>()
   if (body.name)     user.name     = body.name.trim()
-  if (body.password) user.password = body.password
+  if (body.password) user.password = await hashPassword(body.password)
   if (body.role)     user.role     = body.role === 'admin' ? 'admin' : 'rep'
   await db`UPDATE app_users SET name = ${user.name}, password = ${user.password}, role = ${user.role} WHERE id = ${user.id}`
   return c.json({ id: user.id, name: user.name, username: user.username, role: user.role })

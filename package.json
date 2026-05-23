@@ -5,7 +5,8 @@
     "dev": "vercel dev"
   },
   "dependencies": {
-    "@neondatabase/serverless": "^1.1.0",
-    "hono": "^4.12.22"
+    "bcryptjs": "^3.0.3",
+    "hono": "^4.12.22",
+    "postgres": "^3.4.9"
   }
 }
