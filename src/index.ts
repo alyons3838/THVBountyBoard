@@ -16,9 +16,11 @@ interface User {
   id: string
   name: string
   username: string   // login handle (lowercase, no spaces)
+  email?: string
   password: string
   role: Role
   createdAt: string
+  passwordChangeRequired?: boolean
 }
 
 const users: User[] = [
@@ -156,12 +158,22 @@ function mapUser(row: any): User {
     password: row.password,
     role: row.role,
     createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+    email: row.email || '',
+    passwordChangeRequired: Boolean(row.password_change_required),
   }
 }
 
 function publicUser(row: any) {
   const user = mapUser(row)
-  return { id: user.id, name: user.name, username: user.username, role: user.role, createdAt: user.createdAt }
+  return {
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    email: user.email || '',
+    role: user.role,
+    createdAt: user.createdAt,
+    passwordChangeRequired: Boolean(user.passwordChangeRequired),
+  }
 }
 
 function mapProperty(row: any): Property {
@@ -262,10 +274,14 @@ async function ensureDb() {
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       username TEXT NOT NULL UNIQUE,
+      email TEXT NOT NULL DEFAULT '',
       password TEXT NOT NULL,
       role TEXT NOT NULL CHECK (role IN ('rep', 'admin')),
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      password_change_required BOOLEAN NOT NULL DEFAULT FALSE
     )`
+    await db`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`
+    await db`ALTER TABLE app_users ADD COLUMN IF NOT EXISTS password_change_required BOOLEAN NOT NULL DEFAULT FALSE`
     await db`CREATE TABLE IF NOT EXISTS sessions (
       token TEXT PRIMARY KEY,
       user_id TEXT NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
@@ -333,8 +349,8 @@ async function ensureDb() {
 
     for (const user of users) {
       const passwordHash = await hashPassword(user.password)
-      await db`INSERT INTO app_users (id, name, username, password, role, created_at)
-        VALUES (${user.id}, ${user.name}, ${user.username}, ${passwordHash}, ${user.role}, ${user.createdAt})
+      await db`INSERT INTO app_users (id, name, username, email, password, role, created_at, password_change_required)
+        VALUES (${user.id}, ${user.name}, ${user.username}, ${user.email || ''}, ${passwordHash}, ${user.role}, ${user.createdAt}, ${Boolean(user.passwordChangeRequired)})
         ON CONFLICT (id) DO NOTHING`
     }
     for (const property of properties) {
@@ -408,7 +424,7 @@ app.post('/api/auth/login', async (c) => {
   const expires = Date.now() + 8 * 60 * 60 * 1000
   await db`INSERT INTO sessions (token, user_id, role, name, expires_at)
     VALUES (${token}, ${user.id}, ${user.role}, ${user.name}, ${new Date(expires).toISOString()})`
-  return c.json({ token, role: user.role, name: user.name })
+  return c.json({ token, role: user.role, name: user.name, passwordChangeRequired: Boolean(user.passwordChangeRequired) })
 })
 
 app.post('/api/auth/logout', async (c) => {
@@ -424,7 +440,27 @@ app.post('/api/auth/logout', async (c) => {
 app.get('/api/auth/check', async (c) => {
   const token = c.req.header('x-auth-token')
   const s = await getSession(token)
-  return c.json(s ? { valid: true, role: s.role, name: s.name } : { valid: false })
+  if (!s) return c.json({ valid: false })
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT password_change_required FROM app_users WHERE id = ${s.userId}`
+  return c.json({
+    valid: true,
+    role: s.role,
+    name: s.name,
+    passwordChangeRequired: Boolean(rows[0]?.password_change_required),
+  })
+})
+
+app.post('/api/auth/change-password', async (c) => {
+  const session = await requireSession(c.req.header('x-auth-token'))
+  if (!session) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const { password } = await c.req.json<{ password: string }>()
+  if (!password || password.trim().length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400)
+  await db`UPDATE app_users SET password = ${await hashPassword(password.trim())}, password_change_required = FALSE WHERE id = ${session.userId}`
+  return c.json({ ok: true })
 })
 
 // ─── Users API (admin only) ─────────────────────────────────────────────────────
@@ -432,7 +468,7 @@ app.get('/api/users', async (c) => {
   if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
-  const rows = await db`SELECT id, name, username, password, role, created_at FROM app_users ORDER BY created_at ASC`
+  const rows = await db`SELECT id, name, username, email, password, role, created_at, password_change_required FROM app_users ORDER BY created_at ASC`
   return c.json(rows.map(publicUser))
 })
 
@@ -440,7 +476,7 @@ app.post('/api/users', async (c) => {
   if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
-  const body = await c.req.json<{ name: string; username: string; password: string; role: Role }>()
+  const body = await c.req.json<{ name: string; username: string; email?: string; password: string; role: Role; passwordChangeRequired?: boolean }>()
   if (!body.name || !body.username || !body.password) return c.json({ error: 'name, username, password required' }, 400)
   const slug = body.username.toLowerCase().trim().replace(/\s+/g, '')
   const existing = await db`SELECT id FROM app_users WHERE username = ${slug}`
@@ -449,13 +485,15 @@ app.post('/api/users', async (c) => {
     id: 'u-' + Date.now(),
     name: body.name.trim(),
     username: slug,
+    email: body.email?.trim() || '',
     password: await hashPassword(body.password),
     role: body.role === 'admin' ? 'admin' : 'rep',
     createdAt: new Date().toISOString(),
+    passwordChangeRequired: Boolean(body.passwordChangeRequired),
   }
-  await db`INSERT INTO app_users (id, name, username, password, role, created_at)
-    VALUES (${newUser.id}, ${newUser.name}, ${newUser.username}, ${newUser.password}, ${newUser.role}, ${newUser.createdAt})`
-  return c.json({ id: newUser.id, name: newUser.name, username: newUser.username, role: newUser.role }, 201)
+  await db`INSERT INTO app_users (id, name, username, email, password, role, created_at, password_change_required)
+    VALUES (${newUser.id}, ${newUser.name}, ${newUser.username}, ${newUser.email || ''}, ${newUser.password}, ${newUser.role}, ${newUser.createdAt}, ${Boolean(newUser.passwordChangeRequired)})`
+  return c.json(publicUser({ ...newUser, created_at: newUser.createdAt, password_change_required: newUser.passwordChangeRequired }), 201)
 })
 
 app.patch('/api/users/:id', async (c) => {
@@ -465,12 +503,27 @@ app.patch('/api/users/:id', async (c) => {
   const current = await db`SELECT * FROM app_users WHERE id = ${c.req.param('id')}`
   if (!current.length) return c.json({ error: 'Not found' }, 404)
   const user = mapUser(current[0])
-  const body = await c.req.json<{ name?: string; password?: string; role?: Role }>()
+  const body = await c.req.json<{ name?: string; email?: string; password?: string; role?: Role; passwordChangeRequired?: boolean }>()
   if (body.name)     user.name     = body.name.trim()
+  if (body.email !== undefined) user.email = body.email.trim()
   if (body.password) user.password = await hashPassword(body.password)
   if (body.role)     user.role     = body.role === 'admin' ? 'admin' : 'rep'
-  await db`UPDATE app_users SET name = ${user.name}, password = ${user.password}, role = ${user.role} WHERE id = ${user.id}`
-  return c.json({ id: user.id, name: user.name, username: user.username, role: user.role })
+  if (body.passwordChangeRequired !== undefined) user.passwordChangeRequired = Boolean(body.passwordChangeRequired)
+  await db`UPDATE app_users SET
+    name = ${user.name},
+    email = ${user.email || ''},
+    password = ${user.password},
+    role = ${user.role},
+    password_change_required = ${Boolean(user.passwordChangeRequired)}
+    WHERE id = ${user.id}`
+  return c.json({
+    id: user.id,
+    name: user.name,
+    username: user.username,
+    email: user.email || '',
+    role: user.role,
+    passwordChangeRequired: Boolean(user.passwordChangeRequired),
+  })
 })
 
 app.delete('/api/users/:id', async (c) => {
@@ -870,7 +923,7 @@ app.get('*', (c) => {
     .cl-decrease { border-left: 3px solid #1a3a5c; background: #f5f8ff; }
     .cl-neutral  { border-left: 3px solid #ccc;    background: #fafafa; }
 
-    select, input[type=text], input[type=number], input[type=date],
+    select, input[type=text], input[type=email], input[type=number], input[type=date],
     input[type=url], input[type=password], textarea { background: #fff; }
 
     .th-input {
@@ -911,6 +964,33 @@ app.get('*', (c) => {
     <button onclick="doLogin()"
       class="mt-4 w-full py-2.5 bg-bounty-dark text-white font-bold rounded uppercase tracking-wide hover:bg-bounty-brown transition-all text-sm">
       <i class="fas fa-sign-in-alt mr-1.5"></i> Sign In
+    </button>
+  </div>
+</div>
+
+<!-- ════════════ REQUIRED PASSWORD CHANGE ════════════ -->
+<div id="password-change-gate" class="hidden fixed inset-0 bg-black z-[9998] flex items-center justify-center px-4">
+  <div class="parchment rounded-2xl p-8 w-full max-w-sm card-shadow relative">
+    <div class="pin pin-gold"></div>
+    <div class="text-center mb-5">
+      <i class="fas fa-key text-bounty-gold text-3xl mb-3 block"></i>
+      <div class="font-display text-bounty-dark text-2xl font-black">Create Password</div>
+      <p class="text-gray-500 text-sm mt-1">Choose a personal password before continuing.</p>
+    </div>
+    <div id="pc-error" class="hidden mb-3 text-center text-bounty-red text-sm font-semibold bg-red-50 rounded px-3 py-2"></div>
+    <div class="space-y-3">
+      <div>
+        <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">New Password</label>
+        <input type="password" id="pc-password" autocomplete="new-password" class="th-input" />
+      </div>
+      <div>
+        <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Confirm Password</label>
+        <input type="password" id="pc-confirm" autocomplete="new-password" class="th-input" onkeydown="if(event.key==='Enter')completePasswordChange()" />
+      </div>
+    </div>
+    <button onclick="completePasswordChange()"
+      class="mt-4 w-full py-2.5 bg-bounty-dark text-white font-bold rounded uppercase tracking-wide hover:bg-bounty-brown transition-all text-sm">
+      <i class="fas fa-check mr-1.5"></i> Continue
     </button>
   </div>
 </div>
@@ -1232,13 +1312,27 @@ app.get('*', (c) => {
               <input type="text" id="nu-name" placeholder="e.g. Morgan S." class="th-input" /></div>
             <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Username *</label>
               <input type="text" id="nu-username" placeholder="e.g. morgan" class="th-input" /></div>
-            <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Password *</label>
-              <input type="password" id="nu-password" placeholder="initial password" class="th-input" /></div>
+            <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Email</label>
+              <input type="email" id="nu-email" placeholder="morgan@example.com" class="th-input" /></div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Temporary Password *</label>
+              <div class="flex gap-2">
+                <input type="text" id="nu-password" placeholder="generate or type one" class="th-input" />
+                <button type="button" onclick="fillGeneratedPassword()"
+                  class="px-3 border border-bounty-gold/40 rounded text-bounty-brown hover:bg-bounty-gold/10 transition-all" title="Generate password">
+                  <i class="fas fa-wand-magic-sparkles"></i>
+                </button>
+              </div>
+            </div>
             <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Role *</label>
               <select id="nu-role" class="th-input">
                 <option value="rep">Rep</option>
                 <option value="admin">Admin</option>
               </select></div>
+            <label class="flex items-center gap-2 text-xs font-bold text-bounty-dark mt-6">
+              <input type="checkbox" id="nu-force-change" checked />
+              Force password change on first login
+            </label>
           </div>
           <div class="flex items-center gap-3">
             <button onclick="addUser()" class="px-4 py-1.5 bg-bounty-red text-white font-bold rounded text-xs uppercase hover:bg-red-800 transition-all">
@@ -1368,11 +1462,13 @@ let allLeaderboard = [];
 let allChangelog   = [];
 let allUsers       = [];
 let allBonusRules  = { lastMinute:{amount:25,label:'LAST MINUTE HERO',description:'within 14 days',icon:'bolt'}, weekend:{amount:15,label:'WEEKEND WARRIOR',description:'Fri or Sat night',icon:'calendar-week'}, longStay:{amount:15,label:'LONG STAY LEGEND',description:'5+ nights',icon:'moon'} };
+let invitePasswords = {};
 
 // ─ Auth state ─
 let authToken = sessionStorage.getItem('authToken') || null;
 let authRole  = sessionStorage.getItem('authRole')  || null;  // 'rep' | 'admin'
 let authName  = sessionStorage.getItem('authName')  || null;
+let authPasswordChangeRequired = sessionStorage.getItem('authPasswordChangeRequired') === 'true';
 let _loginTarget = null;  // 'submit' | 'admin' | 'general' -- where to navigate after login
 
 // ════════════════════════════════════════════════════════════
@@ -1395,10 +1491,11 @@ function closeLoginGate() {
 }
 
 function clearStoredSession() {
-  authToken = null; authRole = null; authName = null;
+  authToken = null; authRole = null; authName = null; authPasswordChangeRequired = false;
   sessionStorage.removeItem('authToken');
   sessionStorage.removeItem('authRole');
   sessionStorage.removeItem('authName');
+  sessionStorage.removeItem('authPasswordChangeRequired');
 }
 
 async function verifyStoredSession() {
@@ -1412,8 +1509,10 @@ async function verifyStoredSession() {
     }
     authRole = data.role;
     authName = data.name;
+    authPasswordChangeRequired = Boolean(data.passwordChangeRequired);
     sessionStorage.setItem('authRole', data.role);
     sessionStorage.setItem('authName', data.name);
+    sessionStorage.setItem('authPasswordChangeRequired', String(authPasswordChangeRequired));
     return true;
   } catch {
     clearStoredSession();
@@ -1441,13 +1540,19 @@ async function doLogin() {
     document.getElementById('gate-pw').value = '';
     return;
   }
-  const { token, role, name } = await res.json();
+  const { token, role, name, passwordChangeRequired } = await res.json();
   authToken = token; authRole = role; authName = name;
+  authPasswordChangeRequired = Boolean(passwordChangeRequired);
   sessionStorage.setItem('authToken', token);
   sessionStorage.setItem('authRole',  role);
   sessionStorage.setItem('authName',  name);
+  sessionStorage.setItem('authPasswordChangeRequired', String(authPasswordChangeRequired));
   document.getElementById('login-gate').classList.add('hidden');
   updateUserChip();
+  if (authPasswordChangeRequired) {
+    openPasswordChangeGate();
+    return;
+  }
   await loadAppData();
   renderBonusPills();
   populatePropertySelect();
@@ -1457,6 +1562,53 @@ async function doLogin() {
   else if (target === 'admin' && role === 'admin') { showTab('admin'); }
   else { showTab('board'); }
   if (role === 'admin') renderAdmin();
+}
+
+function openPasswordChangeGate() {
+  const err = document.getElementById('pc-error');
+  err.classList.add('hidden'); err.textContent = '';
+  document.getElementById('pc-password').value = '';
+  document.getElementById('pc-confirm').value = '';
+  document.getElementById('password-change-gate').classList.remove('hidden');
+  setTimeout(() => document.getElementById('pc-password').focus(), 80);
+}
+
+async function completePasswordChange() {
+  const password = document.getElementById('pc-password').value;
+  const confirm = document.getElementById('pc-confirm').value;
+  const err = document.getElementById('pc-error');
+  if (password.length < 8) {
+    err.textContent = 'Use at least 8 characters.';
+    err.classList.remove('hidden');
+    return;
+  }
+  if (password !== confirm) {
+    err.textContent = 'Passwords do not match.';
+    err.classList.remove('hidden');
+    return;
+  }
+  const res = await fetch('/api/auth/change-password', {
+    method:'POST',
+    headers:authHeaders({'Content-Type':'application/json'}),
+    body: JSON.stringify({ password }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    err.textContent = data.error || 'Could not update password.';
+    err.classList.remove('hidden');
+    return;
+  }
+  authPasswordChangeRequired = false;
+  sessionStorage.setItem('authPasswordChangeRequired', 'false');
+  document.getElementById('password-change-gate').classList.add('hidden');
+  await loadAppData();
+  renderBonusPills();
+  populatePropertySelect();
+  const target = _loginTarget; _loginTarget = null;
+  if (target === 'submit') { showTab('submit'); }
+  else if (target === 'admin' && authRole === 'admin') { showTab('admin'); }
+  else { showTab('board'); }
+  if (authRole === 'admin') renderAdmin();
 }
 
 async function doLogout() {
@@ -1807,11 +1959,16 @@ function renderAdminUsers() {
         <i class="fas fa-user-circle text-bounty-brown text-lg flex-shrink-0"></i>
         <div>
           <div class="font-bold text-bounty-dark text-sm">\${u.name}</div>
-          <div class="text-gray-400 text-xs">@\${u.username}</div>
+          <div class="text-gray-400 text-xs">@\${u.username}\${u.email ? ' | ' + u.email : ''}</div>
         </div>
       </div>
       <span class="\${u.role === 'admin' ? 'role-admin' : 'role-rep'}">\${u.role}</span>
+      \${u.passwordChangeRequired ? '<span class="text-[9px] font-black uppercase tracking-wide px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800">temp pw</span>' : ''}
       <div class="flex gap-2 ml-auto">
+        <button onclick="sendLoginEmail('\${u.id}')"
+          class="text-xs px-2 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10 transition-all">
+          <i class="fas fa-envelope mr-1"></i>Email
+        </button>
         <button onclick="promptResetPassword('\${u.id}','\${u.name.replace(/'/g,'&amp;#39;')}')"
           class="text-xs px-2 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10 transition-all">
           <i class="fas fa-key mr-1"></i>Reset PW
@@ -1825,35 +1982,104 @@ function renderAdminUsers() {
   \`).join('');
 }
 
+function generateTempPassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+  const symbols = '!#$%';
+  let value = '';
+  const cryptoObj = window.crypto || window.msCrypto;
+  for (let i = 0; i < 10; i++) {
+    const bucket = new Uint32Array(1);
+    cryptoObj.getRandomValues(bucket);
+    value += chars[bucket[0] % chars.length];
+  }
+  const symbolBucket = new Uint32Array(1);
+  cryptoObj.getRandomValues(symbolBucket);
+  return value + symbols[symbolBucket[0] % symbols.length];
+}
+
+function fillGeneratedPassword() {
+  document.getElementById('nu-password').value = generateTempPassword();
+}
+
+function buildLoginEmail(user, tempPassword) {
+  const loginUrl = window.location.origin;
+  const subject = 'Your Thousand Hills login';
+  const lines = [
+    \`Hi \${user.name},\`,
+    '',
+    'Your Thousand Hills login is ready.',
+    '',
+    \`Login: \${loginUrl}\`,
+    \`Username: \${user.username}\`,
+  ];
+  if (tempPassword) {
+    lines.push(\`Temporary password: \${tempPassword}\`);
+    lines.push('');
+    lines.push('After you sign in, you will be asked to create your own password.');
+  } else if (user.passwordChangeRequired) {
+    lines.push('Use the temporary password you were given. After you sign in, you will be asked to create your own password.');
+  } else {
+    lines.push('Use the password you created previously.');
+  }
+  return {
+    subject,
+    body: lines.join('\\n'),
+  };
+}
+
+function openLoginMailto(user, tempPassword) {
+  const email = buildLoginEmail(user, tempPassword);
+  const to = user.email || '';
+  window.location.href = \`mailto:\${encodeURIComponent(to)}?subject=\${encodeURIComponent(email.subject)}&body=\${encodeURIComponent(email.body)}\`;
+}
+
+function sendLoginEmail(userId, tempPassword) {
+  const user = allUsers.find(u => u.id === userId);
+  if (!user) return;
+  openLoginMailto(user, tempPassword || invitePasswords[userId]);
+}
+
 async function addUser() {
   const name     = document.getElementById('nu-name').value.trim();
   const username = document.getElementById('nu-username').value.trim();
+  const email    = document.getElementById('nu-email').value.trim();
   const password = document.getElementById('nu-password').value;
   const role     = document.getElementById('nu-role').value;
+  const passwordChangeRequired = document.getElementById('nu-force-change').checked;
   const msg      = document.getElementById('user-add-msg');
   if (!name || !username || !password) { msg.textContent='Fill in all fields.'; msg.className='text-xs text-bounty-red font-semibold'; msg.classList.remove('hidden'); return; }
   const res = await fetch('/api/users', {
     method:'POST',
     headers:authHeaders({'Content-Type':'application/json'}),
-    body: JSON.stringify({ name, username, password, role }),
+    body: JSON.stringify({ name, username, email, password, role, passwordChangeRequired }),
   });
   const data = await res.json();
   if (!res.ok) { msg.textContent = data.error || 'Error adding user.'; msg.className='text-xs text-bounty-red font-semibold'; msg.classList.remove('hidden'); return; }
-  msg.textContent = 'Account created!'; msg.className='text-xs text-bounty-green font-semibold'; msg.classList.remove('hidden');
-  document.getElementById('nu-name').value=''; document.getElementById('nu-username').value=''; document.getElementById('nu-password').value='';
+  invitePasswords[data.id] = password;
+  msg.innerHTML = 'Account created! <button type="button" class="underline font-black" onclick="sendLoginEmail(\\'' + data.id + '\\')">Email login</button>';
+  msg.className='text-xs text-bounty-green font-semibold';
+  msg.classList.remove('hidden');
+  document.getElementById('nu-name').value=''; document.getElementById('nu-username').value=''; document.getElementById('nu-email').value=''; document.getElementById('nu-password').value='';
+  document.getElementById('nu-force-change').checked = true;
   await fetchUsers(); renderAdminUsers();
+  openLoginMailto(data, password);
   setTimeout(() => msg.classList.add('hidden'), 3000);
 }
 
 async function promptResetPassword(userId, userName) {
-  const newPw = prompt(\`New password for \${userName}:\`);
+  const suggested = generateTempPassword();
+  const newPw = prompt(\`Temporary password for \${userName}:\`, suggested);
   if (!newPw || !newPw.trim()) return;
   const res = await fetch(\`/api/users/\${userId}\`, {
     method:'PATCH',
     headers:authHeaders({'Content-Type':'application/json'}),
-    body: JSON.stringify({ password: newPw.trim() }),
+    body: JSON.stringify({ password: newPw.trim(), passwordChangeRequired: true }),
   });
-  if (res.ok) alert(\`Password updated for \${userName}.\`);
+  if (res.ok) {
+    const updated = await res.json();
+    await fetchUsers(); renderAdminUsers();
+    openLoginMailto(updated, newPw.trim());
+  }
   else alert('Failed to update password.');
 }
 
@@ -2189,6 +2415,10 @@ async function init() {
   updateUserChip();
   if (!signedIn) {
     openLoginGate('general');
+    return;
+  }
+  if (authPasswordChangeRequired) {
+    openPasswordChangeGate();
     return;
   }
   await loadAppData();
