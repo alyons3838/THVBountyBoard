@@ -139,12 +139,12 @@ const bonusRules = {
 const leaderboard: { name: string; total: number; bookings: number }[] = []
 
 // ─── Database ─────────────────────────────────────────────────────────────────
-const databaseUrl = process.env.DATABASE_URL
+const databaseUrl = process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL
 const sql = databaseUrl ? postgres(databaseUrl, { ssl: 'require', max: 1 }) : null
 let dbReady: Promise<void> | null = null
 
 function requireDb() {
-  if (!sql) throw new Error('DATABASE_URL is not configured')
+  if (!sql) throw new Error('SUPABASE_DATABASE_URL or DATABASE_URL is not configured')
   return sql
 }
 
