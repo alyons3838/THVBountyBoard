@@ -2027,16 +2027,40 @@ function buildLoginEmail(user, tempPassword) {
   };
 }
 
-function openLoginMailto(user, tempPassword) {
+function buildMailtoHref(user, tempPassword) {
   const email = buildLoginEmail(user, tempPassword);
-  const to = user.email || '';
-  window.location.href = \`mailto:\${encodeURIComponent(to)}?subject=\${encodeURIComponent(email.subject)}&body=\${encodeURIComponent(email.body)}\`;
+  const to = user.email ? encodeURIComponent(user.email) : '';
+  return \`mailto:\${to}?subject=\${encodeURIComponent(email.subject)}&body=\${encodeURIComponent(email.body)}\`;
+}
+
+async function copyLoginDetails(userId, tempPassword) {
+  const user = allUsers.find(u => u.id === userId);
+  if (!user) return;
+  const email = buildLoginEmail(user, tempPassword || invitePasswords[userId]);
+  try {
+    await navigator.clipboard.writeText(email.body);
+    alert('Login details copied.');
+  } catch {
+    prompt('Copy login details:', email.body);
+  }
 }
 
 function sendLoginEmail(userId, tempPassword) {
   const user = allUsers.find(u => u.id === userId);
   if (!user) return;
-  openLoginMailto(user, tempPassword || invitePasswords[userId]);
+  window.location.href = buildMailtoHref(user, tempPassword || invitePasswords[userId]);
+}
+
+function showInviteActions(message, user, tempPassword) {
+  const msg = document.getElementById('user-add-msg');
+  invitePasswords[user.id] = tempPassword;
+  msg.innerHTML = \`
+    <span>\${message}</span>
+    <a class="underline font-black ml-2" href="\${buildMailtoHref(user, tempPassword)}">Email login</a>
+    <button type="button" class="underline font-black ml-2" onclick="copyLoginDetails('\${user.id}')">Copy details</button>
+  \`;
+  msg.className='text-xs text-bounty-green font-semibold';
+  msg.classList.remove('hidden');
 }
 
 async function addUser() {
@@ -2055,15 +2079,10 @@ async function addUser() {
   });
   const data = await res.json();
   if (!res.ok) { msg.textContent = data.error || 'Error adding user.'; msg.className='text-xs text-bounty-red font-semibold'; msg.classList.remove('hidden'); return; }
-  invitePasswords[data.id] = password;
-  msg.innerHTML = 'Account created! <button type="button" class="underline font-black" onclick="sendLoginEmail(\\'' + data.id + '\\')">Email login</button>';
-  msg.className='text-xs text-bounty-green font-semibold';
-  msg.classList.remove('hidden');
   document.getElementById('nu-name').value=''; document.getElementById('nu-username').value=''; document.getElementById('nu-email').value=''; document.getElementById('nu-password').value='';
   document.getElementById('nu-force-change').checked = true;
   await fetchUsers(); renderAdminUsers();
-  openLoginMailto(data, password);
-  setTimeout(() => msg.classList.add('hidden'), 3000);
+  showInviteActions('Account created.', data, password);
 }
 
 async function promptResetPassword(userId, userName) {
@@ -2078,7 +2097,7 @@ async function promptResetPassword(userId, userName) {
   if (res.ok) {
     const updated = await res.json();
     await fetchUsers(); renderAdminUsers();
-    openLoginMailto(updated, newPw.trim());
+    showInviteActions('Temporary password set.', updated, newPw.trim());
   }
   else alert('Failed to update password.');
 }
