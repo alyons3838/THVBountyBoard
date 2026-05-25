@@ -1438,6 +1438,60 @@ app.get('*', (c) => {
         <span class="font-display text-white text-base font-bold">Review Bookings</span>
       </div>
       <div class="p-4">
+        <div class="border border-bounty-gold/20 rounded-lg bg-white/50 p-3 mb-4">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Date Field</label>
+              <select id="bf-date-field" class="th-input" onchange="renderAdminBookings()">
+                <option value="checkIn">Check-in</option>
+                <option value="checkOut">Check-out</option>
+                <option value="submittedAt">Submitted</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">From</label>
+              <input type="date" id="bf-from" class="th-input" onchange="renderAdminBookings()" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">To</label>
+              <input type="date" id="bf-to" class="th-input" onchange="renderAdminBookings()" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Status</label>
+              <select id="bf-status" class="th-input" onchange="renderAdminBookings()">
+                <option value="all">All</option>
+                <option value="pending">Pending</option>
+                <option value="cleared">Cleared</option>
+                <option value="disqualified">Disqualified</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Sort</label>
+              <select id="bf-sort" class="th-input" onchange="renderAdminBookings()">
+                <option value="checkIn-asc">Check-in ↑</option>
+                <option value="checkIn-desc">Check-in ↓</option>
+                <option value="checkOut-asc">Check-out ↑</option>
+                <option value="submittedAt-desc">Newest submitted</option>
+                <option value="totalEarned-desc">Payout high to low</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Search</label>
+              <input type="text" id="bf-search" class="th-input" placeholder="rep, guest, property" oninput="renderAdminBookings()" />
+            </div>
+          </div>
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            <button type="button" onclick="setBookingReviewPreset('thisMonth')"
+              class="text-xs px-3 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10">This Month</button>
+            <button type="button" onclick="setBookingReviewPreset('lastMonth')"
+              class="text-xs px-3 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10">Last Month</button>
+            <button type="button" onclick="setBookingReviewPreset('next30')"
+              class="text-xs px-3 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10">Next 30 Days</button>
+            <button type="button" onclick="clearBookingReviewFilters()"
+              class="text-xs px-3 py-1 border border-gray-200 rounded text-gray-500 hover:bg-gray-50">Clear</button>
+            <div id="booking-filter-summary" class="ml-auto text-xs text-gray-500"></div>
+          </div>
+        </div>
         <div id="admin-booking-list" class="space-y-3">
           <p class="text-gray-400 text-sm text-center py-4">No bookings submitted yet.</p>
         </div>
@@ -2265,11 +2319,66 @@ function renderAdminChangelog() {
 
 function renderAdminBookings() {
   const list = document.getElementById('admin-booking-list');
+  const summary = document.getElementById('booking-filter-summary');
   if (allBookings.length === 0) {
     list.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">No bookings submitted yet.</p>';
+    if (summary) summary.textContent = '';
     return;
   }
-  list.innerHTML = allBookings.slice().reverse().map(b => {
+
+  const dateField = document.getElementById('bf-date-field')?.value || 'checkIn';
+  const from = document.getElementById('bf-from')?.value || '';
+  const to = document.getElementById('bf-to')?.value || '';
+  const status = document.getElementById('bf-status')?.value || 'all';
+  const sort = document.getElementById('bf-sort')?.value || 'checkIn-asc';
+  const search = (document.getElementById('bf-search')?.value || '').toLowerCase().trim();
+
+  const inRange = (value) => {
+    if (!value) return false;
+    const dateOnly = value.slice(0, 10);
+    if (from && dateOnly < from) return false;
+    if (to && dateOnly > to) return false;
+    return true;
+  };
+
+  const filtered = allBookings.filter(b => {
+    const prop = allProperties.find(p => p.id === b.propertyId);
+    if (status !== 'all' && b.status !== status) return false;
+    if ((from || to) && !inRange(b[dateField])) return false;
+    if (search) {
+      const haystack = [b.agentName, b.guestName, prop?.name || b.propertyId, b.status].join(' ').toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    return true;
+  });
+
+  const [sortField, sortDir] = sort.split('-');
+  filtered.sort((a, b) => {
+    const av = sortField === 'totalEarned' ? Number(a.totalEarned) : String(a[sortField] || '');
+    const bv = sortField === 'totalEarned' ? Number(b.totalEarned) : String(b[sortField] || '');
+    if (av < bv) return sortDir === 'asc' ? -1 : 1;
+    if (av > bv) return sortDir === 'asc' ? 1 : -1;
+    return 0;
+  });
+
+  const pendingTotal = filtered.filter(b => b.status === 'pending').reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
+  const clearedTotal = filtered.filter(b => b.status === 'cleared').reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
+  const potentialTotal = filtered.filter(b => b.status !== 'disqualified').reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
+  if (summary) {
+    summary.innerHTML = \`
+      <span class="font-bold text-bounty-dark">\${filtered.length}</span> shown
+      <span class="mx-1 text-gray-300">|</span> Pending: <span class="font-bold text-yellow-700">$\${pendingTotal}</span>
+      <span class="mx-1 text-gray-300">|</span> Cleared: <span class="font-bold text-bounty-green">$\${clearedTotal}</span>
+      <span class="mx-1 text-gray-300">|</span> Potential: <span class="font-bold text-bounty-red">$\${potentialTotal}</span>
+    \`;
+  }
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<p class="text-gray-400 text-sm text-center py-4">No bookings match those filters.</p>';
+    return;
+  }
+
+  list.innerHTML = filtered.map(b => {
     const prop  = allProperties.find(p => p.id === b.propertyId);
     const stCls = {pending:'s-pending',cleared:'s-cleared',disqualified:'s-disq'}[b.status]||'';
     return \`
@@ -2295,6 +2404,49 @@ function renderAdminBookings() {
       </div>
     </div>\`;
   }).join('');
+}
+
+function formatDateInput(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function setBookingReviewPreset(preset) {
+  const today = new Date();
+  const fromEl = document.getElementById('bf-from');
+  const toEl = document.getElementById('bf-to');
+  const dateFieldEl = document.getElementById('bf-date-field');
+  if (!fromEl || !toEl) return;
+
+  if (preset === 'thisMonth') {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    fromEl.value = formatDateInput(start);
+    toEl.value = formatDateInput(end);
+  } else if (preset === 'lastMonth') {
+    const start = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const end = new Date(today.getFullYear(), today.getMonth(), 0);
+    fromEl.value = formatDateInput(start);
+    toEl.value = formatDateInput(end);
+  } else if (preset === 'next30') {
+    const end = new Date(today);
+    end.setDate(today.getDate() + 30);
+    fromEl.value = formatDateInput(today);
+    toEl.value = formatDateInput(end);
+  }
+  if (dateFieldEl && preset === 'next30') dateFieldEl.value = 'checkIn';
+  renderAdminBookings();
+}
+
+function clearBookingReviewFilters() {
+  const ids = ['bf-from','bf-to','bf-search'];
+  ids.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+  const status = document.getElementById('bf-status');
+  const sort = document.getElementById('bf-sort');
+  const dateField = document.getElementById('bf-date-field');
+  if (status) status.value = 'all';
+  if (sort) sort.value = 'checkIn-asc';
+  if (dateField) dateField.value = 'checkIn';
+  renderAdminBookings();
 }
 
 // ════════════════════════════════════════════════════════════
