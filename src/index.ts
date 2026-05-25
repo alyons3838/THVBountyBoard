@@ -142,7 +142,7 @@ const leaderboard: { name: string; total: number; bookings: number }[] = []
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 const databaseUrl = process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL
-const sql = databaseUrl ? postgres(databaseUrl, { ssl: 'require', max: 1 }) : null
+const sql = databaseUrl ? postgres(databaseUrl, { ssl: 'require', max: 1, prepare: false, idle_timeout: 5, connect_timeout: 10 }) : null
 let dbReady: Promise<void> | null = null
 
 function requireDb() {
@@ -267,6 +267,7 @@ async function verifyPassword(password: string, storedPassword: string) {
 }
 
 async function ensureDb() {
+  if (process.env.ENABLE_DB_SETUP !== 'true') return
   if (dbReady) return dbReady
   dbReady = (async () => {
     const db = requireDb()
