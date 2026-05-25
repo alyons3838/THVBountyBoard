@@ -142,7 +142,13 @@ const leaderboard: { name: string; total: number; bookings: number }[] = []
 
 // ─── Database ─────────────────────────────────────────────────────────────────
 const databaseUrl = process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL
-const sql = databaseUrl ? postgres(databaseUrl, { ssl: 'require', max: 1, prepare: false, idle_timeout: 5, connect_timeout: 10 }) : null
+const sql = databaseUrl ? postgres(databaseUrl, {
+  ssl: 'require',
+  max: 5,
+  prepare: false,
+  idle_timeout: 3,
+  connect_timeout: 8,
+}) : null
 let dbReady: Promise<void> | null = null
 
 function requireDb() {
@@ -1556,7 +1562,7 @@ function clearStoredSession() {
 async function verifyStoredSession() {
   if (!authToken) return false;
   try {
-    const res = await fetch('/api/auth/check', { headers:{'x-auth-token': authToken} });
+    const res = await fetchWithTimeout('/api/auth/check', { headers:{'x-auth-token': authToken} });
     const data = await res.json();
     if (!data.valid) {
       clearStoredSession();
@@ -1584,11 +1590,18 @@ async function doLogin() {
     err.classList.remove('hidden');
     return;
   }
-  const res = await fetch('/api/auth/login', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ username, password }),
-  });
+  let res;
+  try {
+    res = await fetchWithTimeout('/api/auth/login', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username, password }),
+    });
+  } catch {
+    err.textContent = 'Login is taking too long. Please refresh and try again.';
+    err.classList.remove('hidden');
+    return;
+  }
   if (!res.ok) {
     err.textContent = 'Incorrect username or password. Try again.';
     err.classList.remove('hidden');
@@ -1602,13 +1615,21 @@ async function doLogin() {
   sessionStorage.setItem('authRole',  role);
   sessionStorage.setItem('authName',  name);
   sessionStorage.setItem('authPasswordChangeRequired', String(authPasswordChangeRequired));
-  document.getElementById('login-gate').classList.add('hidden');
-  updateUserChip();
   if (authPasswordChangeRequired) {
+    document.getElementById('login-gate').classList.add('hidden');
+    updateUserChip();
     openPasswordChangeGate();
     return;
   }
-  await loadAppData();
+  try {
+    await loadAppData();
+  } catch {
+    err.textContent = 'Signed in, but the board data did not load. Please refresh once.';
+    err.classList.remove('hidden');
+    return;
+  }
+  document.getElementById('login-gate').classList.add('hidden');
+  updateUserChip();
   renderBonusPills();
   populatePropertySelect();
   // Navigate to where the user wanted to go
@@ -1642,7 +1663,7 @@ async function completePasswordChange() {
     err.classList.remove('hidden');
     return;
   }
-  const res = await fetch('/api/auth/change-password', {
+  const res = await fetchWithTimeout('/api/auth/change-password', {
     method:'POST',
     headers:authHeaders({'Content-Type':'application/json'}),
     body: JSON.stringify({ password }),
@@ -1668,7 +1689,7 @@ async function completePasswordChange() {
 
 async function doLogout() {
   if (authToken) {
-    await fetch('/api/auth/logout', { method:'POST', headers:{'x-auth-token': authToken} });
+    await fetchWithTimeout('/api/auth/logout', { method:'POST', headers:{'x-auth-token': authToken} }).catch(() => {});
   }
   clearStoredSession();
   updateUserChip();
@@ -1743,8 +1764,18 @@ function authHeaders(extra = {}) {
   return { ...extra, 'x-auth-token': authToken || '' };
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function authedJson(url) {
-  const r = await fetch(url, { headers: authHeaders() });
+  const r = await fetchWithTimeout(url, { headers: authHeaders() });
   if (r.status === 401) {
     clearStoredSession();
     updateUserChip();
@@ -1755,7 +1786,11 @@ async function authedJson(url) {
 }
 
 async function loadAppData() {
-  await Promise.all([fetchProperties(), fetchBookings(), fetchLeaderboard(), fetchChangelog(), fetchBonusRules()]);
+  await fetchProperties();
+  await fetchBookings();
+  await fetchLeaderboard();
+  await fetchChangelog();
+  await fetchBonusRules();
 }
 
 async function fetchProperties() {
@@ -1775,7 +1810,7 @@ async function fetchBonusRules() {
 }
 async function fetchUsers() {
   if (!authToken || authRole !== 'admin') return;
-  const r = await fetch('/api/users', { headers:authHeaders() });
+  const r = await fetchWithTimeout('/api/users', { headers:authHeaders() });
   if (r.ok) allUsers = await r.json();
 }
 
