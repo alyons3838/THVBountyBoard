@@ -76,6 +76,7 @@ interface Booking {
   bonusEarned: number
   totalEarned: number
   status: 'pending' | 'cleared' | 'disqualified'
+  fulfilled: boolean
   submittedAt: string
 }
 
@@ -219,6 +220,7 @@ function mapBooking(row: any): Booking {
     bonusEarned: Number(row.bonus_earned),
     totalEarned: Number(row.total_earned),
     status: row.status,
+    fulfilled: Boolean(row.fulfilled),
     submittedAt: new Date(row.submitted_at).toISOString(),
   }
 }
@@ -336,6 +338,7 @@ async function ensureDb() {
       bonus_earned NUMERIC NOT NULL,
       total_earned NUMERIC NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('pending', 'cleared', 'disqualified')),
+      fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
       submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
     await db`CREATE TABLE IF NOT EXISTS changelog (
@@ -723,7 +726,7 @@ app.post('/api/bookings', async (c) => {
   if (!session) return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
-  const body = await c.req.json<Omit<Booking, 'id' | 'submittedAt' | 'baseBounty' | 'bonusEarned' | 'totalEarned' | 'status'>>()
+  const body = await c.req.json<Omit<Booking, 'id' | 'submittedAt' | 'baseBounty' | 'bonusEarned' | 'totalEarned' | 'status' | 'fulfilled'>>()
   const propRows = await db`SELECT * FROM properties WHERE id = ${body.propertyId}`
   if (!propRows.length) return c.json({ error: 'Property not found' }, 404)
   const prop = mapProperty(propRows[0])
@@ -745,18 +748,19 @@ app.post('/api/bookings', async (c) => {
     bonusEarned,
     totalEarned,
     status: 'pending',
+    fulfilled: false,
     submittedAt,
   }
   await db`INSERT INTO bookings (
     id, property_id, agent_name, guest_name, check_in, check_out, nights, rate,
     is_weekend, is_last_minute, is_long_stay, base_bounty, bonus_earned,
-    total_earned, status, submitted_at
+    total_earned, status, fulfilled, submitted_at
   ) VALUES (
     ${booking.id}, ${booking.propertyId}, ${booking.agentName}, ${booking.guestName},
     ${booking.checkIn}, ${booking.checkOut}, ${booking.nights}, ${booking.rate},
     ${booking.isWeekend}, ${booking.isLastMinute}, ${booking.isLongStay},
     ${booking.baseBounty}, ${booking.bonusEarned}, ${booking.totalEarned},
-    ${booking.status}, ${booking.submittedAt}
+    ${booking.status}, ${booking.fulfilled}, ${booking.submittedAt}
   )`
 
   await db`INSERT INTO leaderboard_entries (name, total, bookings)
@@ -776,6 +780,18 @@ app.patch('/api/bookings/:id/status', async (c) => {
   if (!rows.length) return c.json({ error: 'Not found' }, 404)
   const { status } = await c.req.json<{ status: Booking['status'] }>()
   await db`UPDATE bookings SET status = ${status} WHERE id = ${c.req.param('id')}`
+  const updated = await db`SELECT * FROM bookings WHERE id = ${c.req.param('id')}`
+  return c.json(mapBooking(updated[0]))
+})
+
+app.patch('/api/bookings/:id/fulfilled', async (c) => {
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM bookings WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
+  const { fulfilled } = await c.req.json<{ fulfilled: boolean }>()
+  await db`UPDATE bookings SET fulfilled = ${Boolean(fulfilled)} WHERE id = ${c.req.param('id')}`
   const updated = await db`SELECT * FROM bookings WHERE id = ${c.req.param('id')}`
   return c.json(mapBooking(updated[0]))
 })
@@ -1445,7 +1461,7 @@ app.get('*', (c) => {
       </div>
       <div class="p-4">
         <div class="border border-bounty-gold/20 rounded-lg bg-white/50 p-3 mb-4">
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
             <div>
               <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Date Field</label>
               <select id="bf-date-field" class="th-input" onchange="renderAdminBookings()">
@@ -1469,6 +1485,14 @@ app.get('*', (c) => {
                 <option value="pending">Pending</option>
                 <option value="cleared">Cleared</option>
                 <option value="disqualified">Disqualified</option>
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Payout</label>
+              <select id="bf-fulfilled" class="th-input" onchange="renderAdminBookings()">
+                <option value="all">All</option>
+                <option value="open">Needs payout</option>
+                <option value="fulfilled">Fulfilled</option>
               </select>
             </div>
             <div>
@@ -2365,6 +2389,7 @@ function renderAdminBookings() {
   const from = document.getElementById('bf-from')?.value || '';
   const to = document.getElementById('bf-to')?.value || '';
   const status = document.getElementById('bf-status')?.value || 'all';
+  const fulfilledFilter = document.getElementById('bf-fulfilled')?.value || 'all';
   const sort = document.getElementById('bf-sort')?.value || 'checkIn-asc';
   const search = (document.getElementById('bf-search')?.value || '').toLowerCase().trim();
 
@@ -2379,6 +2404,8 @@ function renderAdminBookings() {
   const filtered = allBookings.filter(b => {
     const prop = allProperties.find(p => p.id === b.propertyId);
     if (status !== 'all' && b.status !== status) return false;
+    if (fulfilledFilter === 'open' && b.fulfilled) return false;
+    if (fulfilledFilter === 'fulfilled' && !b.fulfilled) return false;
     if ((from || to) && !inRange(b[dateField])) return false;
     if (search) {
       const haystack = [b.agentName, b.guestName, prop?.name || b.propertyId, b.status].join(' ').toLowerCase();
@@ -2399,12 +2426,14 @@ function renderAdminBookings() {
   const pendingTotal = filtered.filter(b => b.status === 'pending').reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
   const clearedTotal = filtered.filter(b => b.status === 'cleared').reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
   const potentialTotal = filtered.filter(b => b.status !== 'disqualified').reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
+  const openPayoutTotal = filtered.filter(b => b.status !== 'disqualified' && !b.fulfilled).reduce((sum, b) => sum + Number(b.totalEarned || 0), 0);
   if (summary) {
     summary.innerHTML = \`
       <span class="font-bold text-bounty-dark">\${filtered.length}</span> shown
       <span class="mx-1 text-gray-300">|</span> Pending: <span class="font-bold text-yellow-700">$\${pendingTotal}</span>
       <span class="mx-1 text-gray-300">|</span> Cleared: <span class="font-bold text-bounty-green">$\${clearedTotal}</span>
       <span class="mx-1 text-gray-300">|</span> Potential: <span class="font-bold text-bounty-red">$\${potentialTotal}</span>
+      <span class="mx-1 text-gray-300">|</span> Needs payout: <span class="font-bold text-bounty-blue">$\${openPayoutTotal}</span>
     \`;
   }
 
@@ -2430,6 +2459,10 @@ function renderAdminBookings() {
       </div>
       <div class="flex items-center gap-2">
         <span class="text-xs px-2 py-0.5 rounded-full \${stCls}">\${b.status}</span>
+        <label class="flex items-center gap-1.5 text-xs font-bold text-bounty-dark border border-bounty-gold/20 rounded px-2 py-1 bg-white/70">
+          <input type="checkbox" \${b.fulfilled ? 'checked' : ''} onchange="updateBookingFulfilled('\${b.id}', this.checked)" />
+          Fulfilled
+        </label>
         <select onchange="updateBookingStatus('\${b.id}', this.value)"
           class="text-xs border border-gray-200 rounded px-2 py-1 bg-white">
           <option value="pending"       \${b.status==='pending'      ?'selected':''}>Pending</option>
@@ -2476,9 +2509,11 @@ function clearBookingReviewFilters() {
   const ids = ['bf-from','bf-to','bf-search'];
   ids.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   const status = document.getElementById('bf-status');
+  const fulfilled = document.getElementById('bf-fulfilled');
   const sort = document.getElementById('bf-sort');
   const dateField = document.getElementById('bf-date-field');
   if (status) status.value = 'all';
+  if (fulfilled) fulfilled.value = 'all';
   if (sort) sort.value = 'checkIn-asc';
   if (dateField) dateField.value = 'checkIn';
   renderAdminBookings();
@@ -2612,6 +2647,21 @@ async function updateBookingStatus(id, status) {
   });
   await fetchBookings();
   renderAdmin();
+}
+
+async function updateBookingFulfilled(id, fulfilled) {
+  const res = await fetch(\`/api/bookings/\${id}/fulfilled\`, {
+    method:'PATCH',
+    headers:authHeaders({'Content-Type':'application/json'}),
+    body: JSON.stringify({fulfilled}),
+  });
+  if (!res.ok) {
+    alert('Could not update fulfilled status.');
+    await fetchBookings();
+  } else {
+    allBookings = allBookings.map(b => b.id === id ? {...b, fulfilled} : b);
+  }
+  renderAdminBookings();
 }
 
 // ════════════════════════════════════════════════════════════
