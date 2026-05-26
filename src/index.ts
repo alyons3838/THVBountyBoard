@@ -507,7 +507,8 @@ app.post('/api/users', async (c) => {
 })
 
 app.patch('/api/users/:id', async (c) => {
-  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  const adminSession = await requireSession(c.req.header('x-auth-token'))
+  if (!adminSession || adminSession.role !== 'admin') return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
   const current = await db`SELECT * FROM app_users WHERE id = ${c.req.param('id')}`
@@ -516,7 +517,12 @@ app.patch('/api/users/:id', async (c) => {
   const body = await c.req.json<{ name?: string; email?: string; password?: string; role?: Role; passwordChangeRequired?: boolean }>()
   if (body.name)     user.name     = body.name.trim()
   if (body.email !== undefined) user.email = body.email.trim()
-  if (body.password) user.password = await hashPassword(body.password)
+  const passwordWasReset = Boolean(body.password)
+  if (body.password) {
+    const nextPassword = body.password.trim()
+    if (nextPassword.length < 8) return c.json({ error: 'Password must be at least 8 characters.' }, 400)
+    user.password = await hashPassword(nextPassword)
+  }
   if (body.role)     user.role     = body.role === 'admin' ? 'admin' : 'rep'
   if (body.passwordChangeRequired !== undefined) user.passwordChangeRequired = Boolean(body.passwordChangeRequired)
   await db`UPDATE app_users SET
@@ -526,6 +532,9 @@ app.patch('/api/users/:id', async (c) => {
     role = ${user.role},
     password_change_required = ${Boolean(user.passwordChangeRequired)}
     WHERE id = ${user.id}`
+  if (passwordWasReset && user.id !== adminSession.userId) {
+    await db`DELETE FROM sessions WHERE user_id = ${user.id}`
+  }
   return c.json({
     id: user.id,
     name: user.name,
@@ -537,15 +546,18 @@ app.patch('/api/users/:id', async (c) => {
 })
 
 app.delete('/api/users/:id', async (c) => {
-  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  const adminSession = await requireSession(c.req.header('x-auth-token'))
+  if (!adminSession || adminSession.role !== 'admin') return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
   const rows = await db`SELECT * FROM app_users WHERE id = ${c.req.param('id')}`
   if (!rows.length) return c.json({ error: 'Not found' }, 404)
   const user = mapUser(rows[0])
+  if (user.id === adminSession.userId) return c.json({ error: 'You cannot remove the account you are currently signed in with.' }, 400)
   const admins = await db`SELECT count(*)::int AS count FROM app_users WHERE role = 'admin'`
   if (user.role === 'admin' && Number(admins[0].count) <= 1)
     return c.json({ error: 'Cannot remove last admin' }, 400)
+  await db`DELETE FROM sessions WHERE user_id = ${user.id}`
   await db`DELETE FROM app_users WHERE id = ${user.id}`
   return c.json({ ok: true })
 })
@@ -2083,11 +2095,11 @@ function renderAdminUsers() {
           class="text-xs px-2 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10 transition-all">
           <i class="fas fa-envelope mr-1"></i>Email
         </button>
-        <button onclick="promptResetPassword('\${u.id}','\${u.name.replace(/'/g,'&amp;#39;')}')"
+        <button onclick="promptResetPassword('\${u.id}')"
           class="text-xs px-2 py-1 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10 transition-all">
           <i class="fas fa-key mr-1"></i>Reset PW
         </button>
-        \${u.id !== 'u-admin' ? \`<button onclick="deleteUser('\${u.id}','\${u.name.replace(/'/g,'&amp;#39;')}')"
+        \${u.id !== 'u-admin' ? \`<button onclick="deleteUser('\${u.id}')"
           class="text-xs px-2 py-1 border border-red-200 rounded text-red-500 hover:bg-red-50 transition-all">
           <i class="fas fa-trash mr-1"></i>Remove
         </button>\` : ''}
@@ -2199,9 +2211,11 @@ async function addUser() {
   showInviteActions('Account created.', data, password);
 }
 
-async function promptResetPassword(userId, userName) {
+async function promptResetPassword(userId) {
+  const user = allUsers.find(u => u.id === userId);
+  if (!user) { alert('Could not find that user. Refresh and try again.'); return; }
   const suggested = generateTempPassword();
-  const newPw = prompt(\`Temporary password for \${userName}:\`, suggested);
+  const newPw = prompt(\`Temporary password for \${user.name}:\`, suggested);
   if (!newPw || !newPw.trim()) return;
   const res = await fetch(\`/api/users/\${userId}\`, {
     method:'PATCH',
@@ -2213,11 +2227,16 @@ async function promptResetPassword(userId, userName) {
     await fetchUsers(); renderAdminUsers();
     showInviteActions('Temporary password set.', updated, newPw.trim());
   }
-  else alert('Failed to update password.');
+  else {
+    const data = await res.json().catch(() => ({}));
+    alert(data.error || 'Failed to update password.');
+  }
 }
 
-async function deleteUser(userId, userName) {
-  if (!confirm(\`Remove \${userName}? They will be signed out immediately.\`)) return;
+async function deleteUser(userId) {
+  const user = allUsers.find(u => u.id === userId);
+  if (!user) { alert('Could not find that user. Refresh and try again.'); return; }
+  if (!confirm(\`Remove \${user.name}? They will be signed out immediately.\`)) return;
   const res = await fetch(\`/api/users/\${userId}\`, {
     method:'DELETE', headers:authHeaders()
   });
