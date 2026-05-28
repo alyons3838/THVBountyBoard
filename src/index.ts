@@ -74,6 +74,7 @@ interface Booking {
   isLongStay: boolean
   baseBounty: number
   bonusEarned: number
+  addonSummary: string
   totalEarned: number
   status: 'pending' | 'cleared' | 'disqualified'
   fulfilled: boolean
@@ -134,9 +135,9 @@ const changelog: ChangeLog[] = []
 
 // ─── Global Bonus Rules (editable via Admin) ───────────────────────────────────
 const bonusRules = {
-  lastMinute: { amount: 25, label: 'LAST MINUTE HERO', description: 'within 14 days', icon: 'bolt' },
-  weekend:    { amount: 15, label: 'WEEKEND WARRIOR',  description: 'Fri or Sat night', icon: 'calendar-week' },
-  longStay:   { amount: 15, label: 'LONG STAY LEGEND', description: '5+ nights',        icon: 'moon' },
+  lastMinute: { amount: 25, label: 'LAST MINUTE HERO', description: 'within 14 days', icon: 'bolt', active: true },
+  weekend:    { amount: 15, label: 'WEEKEND WARRIOR',  description: 'Fri or Sat night', icon: 'calendar-week', active: true },
+  longStay:   { amount: 15, label: 'LONG STAY LEGEND', description: '5+ nights',        icon: 'moon', active: true },
 }
 
 interface TopBarItem {
@@ -244,6 +245,7 @@ function mapBooking(row: any): Booking {
     isLongStay: Boolean(row.is_long_stay),
     baseBounty: Number(row.base_bounty),
     bonusEarned: Number(row.bonus_earned),
+    addonSummary: row.addon_summary || '',
     totalEarned: Number(row.total_earned),
     status: row.status,
     fulfilled: Boolean(row.fulfilled),
@@ -277,6 +279,7 @@ function mapBonusRules(rows: any[]) {
         label: row.label,
         description: row.description,
         icon: row.icon,
+        active: row.active === undefined ? true : Boolean(row.active),
       }
     }
   }
@@ -372,8 +375,12 @@ async function ensureDb() {
       amount NUMERIC NOT NULL,
       label TEXT NOT NULL,
       description TEXT NOT NULL,
-      icon TEXT NOT NULL
+      icon TEXT NOT NULL,
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      sort_order INTEGER NOT NULL DEFAULT 0
     )`
+    await db`ALTER TABLE bonus_rules ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE`
+    await db`ALTER TABLE bonus_rules ADD COLUMN IF NOT EXISTS sort_order INTEGER NOT NULL DEFAULT 0`
     await db`CREATE TABLE IF NOT EXISTS top_bar_items (
       id TEXT PRIMARY KEY,
       label TEXT NOT NULL,
@@ -401,11 +408,13 @@ async function ensureDb() {
       is_long_stay BOOLEAN NOT NULL DEFAULT FALSE,
       base_bounty NUMERIC NOT NULL,
       bonus_earned NUMERIC NOT NULL,
+      addon_summary TEXT NOT NULL DEFAULT '',
       total_earned NUMERIC NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('pending', 'cleared', 'disqualified')),
       fulfilled BOOLEAN NOT NULL DEFAULT FALSE,
       submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+    await db`ALTER TABLE bookings ADD COLUMN IF NOT EXISTS addon_summary TEXT NOT NULL DEFAULT ''`
     await db`CREATE TABLE IF NOT EXISTS changelog (
       id TEXT PRIMARY KEY,
       property_id TEXT NOT NULL,
@@ -441,8 +450,8 @@ async function ensureDb() {
       ON CONFLICT (id) DO NOTHING`
     }
     for (const [key, rule] of Object.entries(bonusRules)) {
-      await db`INSERT INTO bonus_rules (key, amount, label, description, icon)
-        VALUES (${key}, ${rule.amount}, ${rule.label}, ${rule.description}, ${rule.icon})
+      await db`INSERT INTO bonus_rules (key, amount, label, description, icon, active, sort_order)
+        VALUES (${key}, ${rule.amount}, ${rule.label}, ${rule.description}, ${rule.icon}, ${rule.active}, ${Object.keys(bonusRules).indexOf(key) + 1})
         ON CONFLICT (key) DO NOTHING`
     }
     for (const item of topBarDefaults) {
@@ -775,14 +784,16 @@ app.patch('/api/bonus-rules', async (c) => {
       label: typeof incoming?.label === 'string' ? incoming.label : current.label,
       description: typeof incoming?.description === 'string' ? incoming.description : current.description,
       icon: current.icon,
+      active: typeof incoming?.active === 'boolean' ? incoming.active : current.active,
     }
-    await db`INSERT INTO bonus_rules (key, amount, label, description, icon)
-      VALUES (${key}, ${next.amount}, ${next.label}, ${next.description}, ${next.icon})
+    await db`INSERT INTO bonus_rules (key, amount, label, description, icon, active, sort_order)
+      VALUES (${key}, ${next.amount}, ${next.label}, ${next.description}, ${next.icon}, ${next.active}, ${Object.keys(bonusRules).indexOf(key) + 1})
       ON CONFLICT (key) DO UPDATE SET
         amount = EXCLUDED.amount,
         label = EXCLUDED.label,
         description = EXCLUDED.description,
-        icon = EXCLUDED.icon`
+        icon = EXCLUDED.icon,
+        active = EXCLUDED.active`
   }
   const rows = await db`SELECT * FROM bonus_rules`
   return c.json(mapBonusRules(rows))
@@ -860,17 +871,23 @@ app.post('/api/bookings', async (c) => {
   if (!session) return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
-  const body = await c.req.json<Omit<Booking, 'id' | 'submittedAt' | 'baseBounty' | 'bonusEarned' | 'totalEarned' | 'status' | 'fulfilled'>>()
+  const body = await c.req.json<Omit<Booking, 'id' | 'submittedAt' | 'baseBounty' | 'bonusEarned' | 'addonSummary' | 'totalEarned' | 'status' | 'fulfilled'> & { selectedAddOns?: string[] }>()
   const propRows = await db`SELECT * FROM properties WHERE id = ${body.propertyId}`
   if (!propRows.length) return c.json({ error: 'Property not found' }, 404)
   const prop = mapProperty(propRows[0])
   const rules = mapBonusRules(await db`SELECT * FROM bonus_rules`)
 
   const baseBounty = Math.min(body.nights * prop.bountyPerNight, prop.cap)
-  let bonusEarned = 0
-  if (body.isLastMinute) bonusEarned += rules.lastMinute.amount
-  if (body.isWeekend)    bonusEarned += rules.weekend.amount
-  if (body.isLongStay)   bonusEarned += rules.longStay.amount
+  const selectedAddOns = Array.isArray(body.selectedAddOns)
+    ? body.selectedAddOns.filter((key) => key in rules && rules[key as keyof typeof rules].active)
+    : [
+        ...(body.isLastMinute ? ['lastMinute'] : []),
+        ...(body.isWeekend ? ['weekend'] : []),
+        ...(body.isLongStay ? ['longStay'] : []),
+      ]
+  const selectedRules = selectedAddOns.map((key) => rules[key as keyof typeof rules])
+  const bonusEarned = selectedRules.reduce((sum, rule) => sum + rule.amount, 0)
+  const addonSummary = selectedRules.map((rule) => rule.label).join(', ')
   const totalEarned = baseBounty + bonusEarned
   const submittedAt = new Date().toISOString()
 
@@ -878,8 +895,12 @@ app.post('/api/bookings', async (c) => {
     ...body,
     agentName: session.name,
     id: 'booking-' + Date.now(),
+    isWeekend: selectedAddOns.includes('weekend'),
+    isLastMinute: selectedAddOns.includes('lastMinute'),
+    isLongStay: selectedAddOns.includes('longStay'),
     baseBounty,
     bonusEarned,
+    addonSummary,
     totalEarned,
     status: 'pending',
     fulfilled: false,
@@ -888,12 +909,12 @@ app.post('/api/bookings', async (c) => {
   await db`INSERT INTO bookings (
     id, property_id, agent_name, guest_name, check_in, check_out, nights, rate,
     is_weekend, is_last_minute, is_long_stay, base_bounty, bonus_earned,
-    total_earned, status, fulfilled, submitted_at
+    addon_summary, total_earned, status, fulfilled, submitted_at
   ) VALUES (
     ${booking.id}, ${booking.propertyId}, ${booking.agentName}, ${booking.guestName},
     ${booking.checkIn}, ${booking.checkOut}, ${booking.nights}, ${booking.rate},
     ${booking.isWeekend}, ${booking.isLastMinute}, ${booking.isLongStay},
-    ${booking.baseBounty}, ${booking.bonusEarned}, ${booking.totalEarned},
+    ${booking.baseBounty}, ${booking.bonusEarned}, ${booking.addonSummary}, ${booking.totalEarned},
     ${booking.status}, ${booking.fulfilled}, ${booking.submittedAt}
   )`
 
@@ -1363,31 +1384,16 @@ app.get('*', (c) => {
           <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Nightly Rate (USD) *</label>
           <input type="number" id="f-rate" required min="0" placeholder="e.g. 249" class="th-input" />
         </div>
-        <div class="bg-bounty-tan/60 rounded-lg p-4 border border-bounty-brown/20">
-          <p class="text-xs font-bold text-bounty-dark mb-3 uppercase tracking-wide">Bonus Qualifiers</p>
-          <div class="space-y-2">
-            <label class="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" id="f-lastminute" class="accent-red-700 w-4 h-4" />
-              <span><strong>Last Minute Hero</strong> – within 14 days of arrival</span>
-              <span class="ml-auto text-bounty-red font-bold text-xs">+$25</span>
-            </label>
-            <label class="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" id="f-weekend" class="accent-yellow-600 w-4 h-4" />
-              <span><strong>Weekend Warrior</strong> – includes Fri or Sat night</span>
-              <span class="ml-auto text-bounty-red font-bold text-xs">+$15</span>
-            </label>
-            <label class="flex items-center gap-2 text-sm cursor-pointer">
-              <input type="checkbox" id="f-longstay" class="accent-green-700 w-4 h-4" />
-              <span><strong>Long Stay Legend</strong> – 5+ nights</span>
-              <span class="ml-auto text-bounty-red font-bold text-xs">+$15</span>
-            </label>
-          </div>
+        <div id="rep-addons-panel" class="bg-bounty-tan/60 rounded-lg p-4 border border-bounty-brown/20">
+          <p class="text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Optional Add-ons</p>
+          <p class="text-xs text-gray-500 mb-3">Check any manager-approved extras that apply.</p>
+          <div class="space-y-2" id="rep-addons-list"></div>
         </div>
         <div id="bounty-preview" class="hidden bounty-panel text-white rounded-lg p-4">
           <div class="font-display text-bounty-gold text-base font-black mb-2 uppercase tracking-wide">Bounty Estimate</div>
           <div class="space-y-1 text-sm">
             <div class="flex justify-between"><span class="text-white/60">Base (nights x per-night)</span><span id="est-base" class="font-bold">--</span></div>
-            <div class="flex justify-between"><span class="text-white/60">Bonus Opportunities</span><span id="est-bonus" class="font-bold text-bounty-gold">--</span></div>
+            <div class="flex justify-between"><span class="text-white/60">Optional Add-ons</span><span id="est-bonus" class="font-bold text-bounty-gold">--</span></div>
             <div class="border-t border-white/20 mt-2 pt-2 flex justify-between text-lg"><span class="font-bold">Estimated Total</span><span id="est-total" class="font-black text-bounty-gold">--</span></div>
             <div class="text-xs text-white/30 mt-1">Subject to property cap and admin review.</div>
           </div>
@@ -1528,9 +1534,9 @@ app.get('*', (c) => {
             <input type="number" id="a-pernite" required min="1" value="3" class="th-input" /></div>
           <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Cap Per Reservation ($) *</label>
             <input type="number" id="a-cap" required min="1" value="35" class="th-input" /></div>
-          <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Bonus Amount ($)</label>
-            <input type="number" id="a-bonus" min="0" value="15" class="th-input" /></div>
-          <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Bonus Condition</label>
+          <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Optional Property Bonus ($)</label>
+            <input type="number" id="a-bonus" min="0" value="0" class="th-input" /></div>
+          <div><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Optional Bonus Condition</label>
             <input type="text" id="a-boncond" placeholder="e.g. Fill a full calendar gap" class="th-input" /></div>
           <div class="md:col-span-2"><label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Property Photo URL</label>
             <input type="url" id="a-photo" placeholder="https://..." class="th-input" /></div>
@@ -1584,18 +1590,18 @@ app.get('*', (c) => {
       </div>
     </div>
 
-    <!-- Bonus Rules Editor -->
+    <!-- Optional Rep Add-ons Editor -->
     <div class="parchment rounded-xl overflow-hidden card-shadow" id="bonus-rules-panel">
       <div class="bg-bounty-dark px-5 py-3 flex items-center gap-2">
         <i class="fas fa-star text-bounty-gold"></i>
-        <span class="font-display text-white text-base font-bold">Booking Bonus Rules</span>
-        <span class="ml-auto text-bounty-tan/40 text-xs">Controls booking calculator payout math</span>
+        <span class="font-display text-white text-base font-bold">Optional Rep Add-ons</span>
+        <span class="ml-auto text-bounty-tan/40 text-xs">Optional checkboxes reps can select on submissions</span>
       </div>
       <div class="p-5">
         <div id="bonus-rules-form" class="space-y-4"></div>
         <div class="mt-4 flex items-center gap-3">
           <button onclick="saveBonusRules()" class="px-5 py-2 bg-bounty-red text-white font-black rounded uppercase tracking-wide hover:bg-red-800 transition-all text-sm">
-            <i class="fas fa-save mr-1"></i> Save Bonus Rules
+            <i class="fas fa-save mr-1"></i> Save Add-ons
           </button>
           <span id="bonus-save-msg" class="text-xs text-bounty-green font-semibold hidden"><i class="fas fa-check-circle mr-1"></i>Saved!</span>
         </div>
@@ -1709,7 +1715,7 @@ let allBookings    = [];
 let allLeaderboard = [];
 let allChangelog   = [];
 let allUsers       = [];
-let allBonusRules  = { lastMinute:{amount:25,label:'LAST MINUTE HERO',description:'within 14 days',icon:'bolt'}, weekend:{amount:15,label:'WEEKEND WARRIOR',description:'Fri or Sat night',icon:'calendar-week'}, longStay:{amount:15,label:'LONG STAY LEGEND',description:'5+ nights',icon:'moon'} };
+let allBonusRules  = { lastMinute:{amount:25,label:'LAST MINUTE HERO',description:'within 14 days',icon:'bolt',active:true}, weekend:{amount:15,label:'WEEKEND WARRIOR',description:'Fri or Sat night',icon:'calendar-week',active:true}, longStay:{amount:15,label:'LONG STAY LEGEND',description:'5+ nights',icon:'moon',active:true} };
 let allTopBarItems = [
   {id:'top-last-minute',label:'LAST MINUTE HERO',valueText:'+$25',description:'within 14 days',icon:'bolt',active:true,sortOrder:1},
   {id:'top-weekend',label:'WEEKEND WARRIOR',valueText:'+$15',description:'Fri or Sat night',icon:'calendar-week',active:true,sortOrder:2},
@@ -2049,6 +2055,29 @@ function renderBonusPills() {
     </div>\`).join('');
 }
 
+function getBonusRuleEntries() {
+  return [
+    ['lastMinute', allBonusRules.lastMinute],
+    ['weekend', allBonusRules.weekend],
+    ['longStay', allBonusRules.longStay],
+  ];
+}
+
+function renderRepAddOns() {
+  const panel = document.getElementById('rep-addons-panel');
+  const list = document.getElementById('rep-addons-list');
+  if (!panel || !list) return;
+  const activeRules = getBonusRuleEntries().filter(([, rule]) => rule.active);
+  panel.classList.toggle('hidden', activeRules.length === 0);
+  list.innerHTML = activeRules.map(([key, rule]) => \`
+    <label class="flex items-center gap-2 text-sm cursor-pointer">
+      <input type="checkbox" class="rep-addon accent-yellow-700 w-4 h-4" value="\${escapeAttr(key)}" />
+      <span><strong>\${escapeHtml(rule.label)}</strong>\${rule.description ? \` - \${escapeHtml(rule.description)}\` : ''}</span>
+      <span class="ml-auto text-bounty-red font-bold text-xs">+$\${Number(rule.amount || 0)}</span>
+    </label>
+  \`).join('');
+}
+
 function topBarIconOptions(selected) {
   const icons = [
     ['bolt','Bolt'],
@@ -2178,28 +2207,32 @@ function renderBonusRulesForm() {
   const wrap = document.getElementById('bonus-rules-form');
   if (!wrap) return;
   const keys = [
-    { key:'lastMinute', title:'Last Minute Hero' },
-    { key:'weekend',    title:'Weekend Warrior'  },
-    { key:'longStay',   title:'Long Stay Legend' },
+    { key:'lastMinute', title:'Add-on Slot 1' },
+    { key:'weekend',    title:'Add-on Slot 2' },
+    { key:'longStay',   title:'Add-on Slot 3' },
   ];
   wrap.innerHTML = keys.map(({key,title}) => {
     const r = allBonusRules[key];
     return \`
     <div class="border border-bounty-gold/20 rounded-lg p-4 bg-white/40">
-      <div class="font-bold text-bounty-dark text-sm mb-3 flex items-center gap-2">
-        <i class="fas fa-\${r.icon} text-bounty-gold"></i> \${title}
+      <div class="font-bold text-bounty-dark text-sm mb-3 flex flex-wrap items-center gap-3">
+        <span class="flex items-center gap-2"><i class="fas fa-\${r.icon} text-bounty-gold"></i> \${title}</span>
+        <label class="ml-auto flex items-center gap-2 text-xs uppercase tracking-wide">
+          <input type="checkbox" id="br-\${key}-active" \${r.active ? 'checked' : ''} />
+          Active for reps
+        </label>
       </div>
       <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div>
-          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Bonus Amount ($)</label>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Amount ($)</label>
           <input type="number" id="br-\${key}-amount" value="\${r.amount}" min="0" class="th-input" />
         </div>
         <div>
-          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Label</label>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Checkbox Label</label>
           <input type="text" id="br-\${key}-label" value="\${r.label}" class="th-input" />
         </div>
         <div>
-          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Description</label>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Helper Text</label>
           <input type="text" id="br-\${key}-description" value="\${r.description}" class="th-input" />
         </div>
       </div>
@@ -2213,16 +2246,19 @@ async function saveBonusRules() {
       amount:      parseFloat(document.getElementById('br-lastMinute-amount').value) || 0,
       label:       document.getElementById('br-lastMinute-label').value.trim(),
       description: document.getElementById('br-lastMinute-description').value.trim(),
+      active:      document.getElementById('br-lastMinute-active').checked,
     },
     weekend: {
       amount:      parseFloat(document.getElementById('br-weekend-amount').value) || 0,
       label:       document.getElementById('br-weekend-label').value.trim(),
       description: document.getElementById('br-weekend-description').value.trim(),
+      active:      document.getElementById('br-weekend-active').checked,
     },
     longStay: {
       amount:      parseFloat(document.getElementById('br-longStay-amount').value) || 0,
       label:       document.getElementById('br-longStay-label').value.trim(),
       description: document.getElementById('br-longStay-description').value.trim(),
+      active:      document.getElementById('br-longStay-active').checked,
     },
   };
   const res = await fetch('/api/bonus-rules', {
@@ -2232,6 +2268,7 @@ async function saveBonusRules() {
   });
   if (!res.ok) { alert('Save failed -- are you still logged in?'); return; }
   allBonusRules = await res.json();
+  renderRepAddOns();
   const msg = document.getElementById('bonus-save-msg');
   msg.classList.remove('hidden');
   setTimeout(() => msg.classList.add('hidden'), 3000);
@@ -2777,10 +2814,8 @@ function renderAdminBookings() {
         <div class="font-bold text-bounty-dark text-sm">\${b.agentName} &rarr; \${prop?prop.name:b.propertyId}</div>
         <div class="text-xs text-gray-500">Guest: \${b.guestName} | \${b.checkIn} &ndash; \${b.checkOut} | \${b.nights} nights | $\${b.rate}/night</div>
         <div class="text-xs text-gray-500 mt-0.5">
-          Base: $\${b.baseBounty} + Bonuses: $\${b.bonusEarned} = <strong>$\${b.totalEarned}</strong>
-          \${b.isLastMinute?'<span class="ml-1 bg-red-50 text-bounty-red border border-red-100 px-1.5 rounded text-xs">Last Min</span>':''}
-          \${b.isWeekend?'<span class="ml-1 bg-yellow-50 text-yellow-700 border border-yellow-100 px-1.5 rounded text-xs">Weekend</span>':''}
-          \${b.isLongStay?'<span class="ml-1 bg-green-50 text-bounty-green border border-green-100 px-1.5 rounded text-xs">Long Stay</span>':''}
+          Base: $\${b.baseBounty} + Add-ons: $\${b.bonusEarned} = <strong>$\${b.totalEarned}</strong>
+          \${b.addonSummary ? \`<span class="ml-1 bg-bounty-gold/10 text-bounty-brown border border-bounty-gold/20 px-1.5 rounded text-xs">\${escapeHtml(b.addonSummary)}</span>\` : ''}
         </div>
       </div>
       <div class="flex items-center gap-2">
@@ -2863,10 +2898,8 @@ function calcPreview() {
   const prop   = allProperties.find(p => p.id === propId);
   const nights = Math.max(0, Math.round((new Date(cout) - new Date(cin)) / 86400000));
   const base   = Math.min(nights * prop.bountyPerNight, prop.cap);
-  const lm = document.getElementById('f-lastminute').checked ? allBonusRules.lastMinute.amount : 0;
-  const wk = document.getElementById('f-weekend').checked   ? allBonusRules.weekend.amount    : 0;
-  const ls = document.getElementById('f-longstay').checked  ? allBonusRules.longStay.amount   : 0;
-  const bonus  = lm + wk + ls;
+  const selectedAddOns = [...document.querySelectorAll('.rep-addon:checked')].map(input => input.value);
+  const bonus = selectedAddOns.reduce((sum, key) => sum + Number(allBonusRules[key]?.amount || 0), 0);
   document.getElementById('est-base').textContent  = \`$\${base}\`;
   document.getElementById('est-bonus').textContent = bonus > 0 ? \`+$\${bonus}\` : '$0';
   document.getElementById('est-total').textContent = \`$\${base + bonus}\`;
@@ -2893,9 +2926,10 @@ async function submitBooking(e) {
       guestName:  document.getElementById('f-guest').value,
       checkIn: cin, checkOut: cout, nights,
       rate:        parseFloat(document.getElementById('f-rate').value),
-      isWeekend:   document.getElementById('f-weekend').checked,
-      isLastMinute:document.getElementById('f-lastminute').checked,
-      isLongStay:  document.getElementById('f-longstay').checked,
+      selectedAddOns: [...document.querySelectorAll('.rep-addon:checked')].map(input => input.value),
+      isWeekend:   false,
+      isLastMinute:false,
+      isLongStay:  false,
     }),
   });
   const booking = await res.json();
@@ -3010,6 +3044,7 @@ async function init() {
   }
   renderBoard();
   renderBonusPills();
+  renderRepAddOns();
   populatePropertySelect();
 }
 
