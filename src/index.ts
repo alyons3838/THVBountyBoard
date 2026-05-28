@@ -149,6 +149,16 @@ interface TopBarItem {
   sortOrder: number
 }
 
+type TopBarSize = 'normal' | 'large' | 'xl'
+
+interface AppSettings {
+  topBarSize: TopBarSize
+}
+
+const defaultAppSettings: AppSettings = {
+  topBarSize: 'large',
+}
+
 const topBarDefaults: TopBarItem[] = [
   { id: 'top-last-minute', label: 'LAST MINUTE HERO', valueText: '+$25', description: 'within 14 days', icon: 'bolt', active: true, sortOrder: 1 },
   { id: 'top-weekend', label: 'WEEKEND WARRIOR', valueText: '+$15', description: 'Fri or Sat night', icon: 'calendar-week', active: true, sortOrder: 2 },
@@ -287,6 +297,18 @@ function mapTopBarItems(rows: any[]): TopBarItem[] {
     .sort((a, b) => a.sortOrder - b.sortOrder)
 }
 
+function normalizeTopBarSize(value: unknown): TopBarSize {
+  return value === 'normal' || value === 'large' || value === 'xl' ? value : defaultAppSettings.topBarSize
+}
+
+function mapAppSettings(rows: any[]): AppSettings {
+  const settings = { ...defaultAppSettings }
+  for (const row of rows) {
+    if (row.key === 'top_bar_size') settings.topBarSize = normalizeTopBarSize(row.value)
+  }
+  return settings
+}
+
 function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
@@ -361,6 +383,10 @@ async function ensureDb() {
       active BOOLEAN NOT NULL DEFAULT TRUE,
       sort_order INTEGER NOT NULL DEFAULT 0
     )`
+    await db`CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`
     await db`CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY,
       property_id TEXT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
@@ -424,6 +450,9 @@ async function ensureDb() {
         VALUES (${item.id}, ${item.label}, ${item.valueText}, ${item.description}, ${item.icon}, ${item.active}, ${item.sortOrder})
         ON CONFLICT (id) DO NOTHING`
     }
+    await db`INSERT INTO app_settings (key, value)
+      VALUES ('top_bar_size', ${defaultAppSettings.topBarSize})
+      ON CONFLICT (key) DO NOTHING`
     for (const entry of leaderboard) {
       await db`INSERT INTO leaderboard_entries (name, total, bookings)
         VALUES (${entry.name}, ${entry.total}, ${entry.bookings})
@@ -772,7 +801,7 @@ app.patch('/api/top-bar-items', async (c) => {
   if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
-  const body = await c.req.json<{ items?: Partial<TopBarItem>[] }>()
+  const body = await c.req.json<{ items?: Partial<TopBarItem>[]; size?: TopBarSize }>()
   const incoming = Array.isArray(body.items) ? body.items.slice(0, 8) : []
   const items = incoming.map((item, index) => ({
     id: item.id && String(item.id).trim() ? String(item.id).trim() : `top-${Date.now()}-${index}`,
@@ -790,10 +819,22 @@ app.patch('/api/top-bar-items', async (c) => {
       await tx`INSERT INTO top_bar_items (id, label, value_text, description, icon, active, sort_order)
         VALUES (${item.id}, ${item.label}, ${item.valueText}, ${item.description}, ${item.icon}, ${item.active}, ${item.sortOrder})`
     }
+    await tx`INSERT INTO app_settings (key, value)
+      VALUES ('top_bar_size', ${normalizeTopBarSize(body.size)})
+      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`
   })
 
   const rows = await db`SELECT * FROM top_bar_items ORDER BY sort_order ASC`
   return c.json(mapTopBarItems(rows))
+})
+
+// ─── App Settings API ─────────────────────────────────────────────────────────
+app.get('/api/app-settings', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM app_settings`
+  return c.json(mapAppSettings(rows))
 })
 
 // ─── Changelog API ─────────────────────────────────────────────────────────────
@@ -1522,6 +1563,14 @@ app.get('*', (c) => {
         <span class="ml-auto text-bounty-tan/40 text-xs">Controls the announcement pills across the top</span>
       </div>
       <div class="p-5">
+        <div class="border border-bounty-gold/20 rounded-lg p-4 bg-white/40 mb-4">
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Display Size</label>
+          <select id="top-bar-size" class="th-input max-w-xs" onchange="previewTopBarSize()">
+            <option value="normal">Normal</option>
+            <option value="large">Large</option>
+            <option value="xl">Extra Large</option>
+          </select>
+        </div>
         <div id="top-bar-form" class="space-y-3"></div>
         <div class="mt-4 flex flex-wrap items-center gap-3">
           <button onclick="addTopBarItem()" class="px-4 py-2 border border-bounty-gold/40 text-bounty-brown font-black rounded uppercase tracking-wide hover:bg-bounty-gold/10 transition-all text-sm">
@@ -1666,6 +1715,7 @@ let allTopBarItems = [
   {id:'top-weekend',label:'WEEKEND WARRIOR',valueText:'+$15',description:'Fri or Sat night',icon:'calendar-week',active:true,sortOrder:2},
   {id:'top-long-stay',label:'LONG STAY LEGEND',valueText:'+$15',description:'5+ nights',icon:'moon',active:true,sortOrder:3},
 ];
+let appSettings = { topBarSize: 'large' };
 let invitePasswords = {};
 
 // ─ Auth state ─
@@ -1935,6 +1985,7 @@ async function loadAppData() {
   await fetchChangelog();
   await fetchBonusRules();
   await fetchTopBarItems();
+  await fetchAppSettings();
 }
 
 async function fetchProperties() {
@@ -1954,6 +2005,9 @@ async function fetchBonusRules() {
 }
 async function fetchTopBarItems() {
   allTopBarItems = await authedJson('/api/top-bar-items');
+}
+async function fetchAppSettings() {
+  appSettings = await authedJson('/api/app-settings');
 }
 async function fetchUsers() {
   if (!authToken || authRole !== 'admin') return;
@@ -1979,12 +2033,19 @@ function renderBonusPills() {
   const bar = document.getElementById('bonus-pill-bar');
   if (!bar) return;
   const items = allTopBarItems.filter(item => item.active);
+  const sizes = {
+    normal: { bar: 'py-2', pill: 'px-4 py-1', icon: 'text-xs', label: 'text-xs', value: 'text-sm', description: 'text-xs' },
+    large: { bar: 'py-3', pill: 'px-5 py-2', icon: 'text-sm', label: 'text-sm', value: 'text-base', description: 'text-sm' },
+    xl: { bar: 'py-4', pill: 'px-6 py-2.5', icon: 'text-base', label: 'text-base', value: 'text-lg', description: 'text-sm' },
+  };
+  const size = sizes[appSettings.topBarSize] || sizes.large;
+  bar.parentElement.className = \`bg-bounty-dark border-b border-bounty-gold/25 \${size.bar}\`;
   bar.innerHTML = items.map((item) => \`
-    <div class="flex items-center gap-2 bg-bounty-gold/15 border border-bounty-gold/25 rounded-full px-4 py-1">
-      <i class="fas fa-\${escapeAttr(item.icon)} text-bounty-gold text-xs"></i>
-      <span class="text-bounty-tan text-xs font-semibold">\${escapeHtml(item.label)}</span>
-      \${item.valueText ? \`<span class="text-bounty-gold font-black text-sm">\${escapeHtml(item.valueText)}</span>\` : ''}
-      \${item.description ? \`<span class="text-bounty-tan/50 text-xs hidden sm:inline">\${escapeHtml(item.description)}</span>\` : ''}
+    <div class="flex items-center gap-2 bg-bounty-gold/15 border border-bounty-gold/25 rounded-full \${size.pill}">
+      <i class="fas fa-\${escapeAttr(item.icon)} text-bounty-gold \${size.icon}"></i>
+      <span class="text-bounty-tan \${size.label} font-semibold">\${escapeHtml(item.label)}</span>
+      \${item.valueText ? \`<span class="text-bounty-gold font-black \${size.value}">\${escapeHtml(item.valueText)}</span>\` : ''}
+      \${item.description ? \`<span class="text-bounty-tan/50 \${size.description} hidden sm:inline">\${escapeHtml(item.description)}</span>\` : ''}
     </div>\`).join('');
 }
 
@@ -2007,6 +2068,8 @@ function topBarIconOptions(selected) {
 function renderTopBarForm() {
   const wrap = document.getElementById('top-bar-form');
   if (!wrap) return;
+  const sizeSelect = document.getElementById('top-bar-size');
+  if (sizeSelect) sizeSelect.value = appSettings.topBarSize || 'large';
   if (!allTopBarItems.length) {
     wrap.innerHTML = '<p class="text-gray-400 text-sm text-center py-2">No top bar spiffs yet.</p>';
     return;
@@ -2042,6 +2105,12 @@ function renderTopBarForm() {
       </div>
     </div>
   \`).join('');
+}
+
+function previewTopBarSize() {
+  const size = document.getElementById('top-bar-size')?.value || 'large';
+  appSettings = {...appSettings, topBarSize: size};
+  renderBonusPills();
 }
 
 function collectTopBarItemsFromForm() {
@@ -2089,13 +2158,15 @@ function removeTopBarItem(index) {
 
 async function saveTopBarItems() {
   const items = collectTopBarItemsFromForm();
+  const size = document.getElementById('top-bar-size')?.value || appSettings.topBarSize || 'large';
   const res = await fetch('/api/top-bar-items', {
     method:'PATCH',
     headers:authHeaders({'Content-Type':'application/json'}),
-    body: JSON.stringify({items}),
+    body: JSON.stringify({items, size}),
   });
   if (!res.ok) { alert('Save failed -- are you still logged in?'); return; }
   allTopBarItems = await res.json();
+  appSettings = {...appSettings, topBarSize: size};
   renderTopBarForm();
   renderBonusPills();
   const msg = document.getElementById('top-bar-save-msg');
