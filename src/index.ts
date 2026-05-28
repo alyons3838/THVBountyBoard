@@ -139,6 +139,22 @@ const bonusRules = {
   longStay:   { amount: 15, label: 'LONG STAY LEGEND', description: '5+ nights',        icon: 'moon' },
 }
 
+interface TopBarItem {
+  id: string
+  label: string
+  valueText: string
+  description: string
+  icon: string
+  active: boolean
+  sortOrder: number
+}
+
+const topBarDefaults: TopBarItem[] = [
+  { id: 'top-last-minute', label: 'LAST MINUTE HERO', valueText: '+$25', description: 'within 14 days', icon: 'bolt', active: true, sortOrder: 1 },
+  { id: 'top-weekend', label: 'WEEKEND WARRIOR', valueText: '+$15', description: 'Fri or Sat night', icon: 'calendar-week', active: true, sortOrder: 2 },
+  { id: 'top-long-stay', label: 'LONG STAY LEGEND', valueText: '+$15', description: '5+ nights', icon: 'moon', active: true, sortOrder: 3 },
+]
+
 const leaderboard: { name: string; total: number; bookings: number }[] = []
 
 // ─── Database ─────────────────────────────────────────────────────────────────
@@ -257,6 +273,20 @@ function mapBonusRules(rows: any[]) {
   return mapped
 }
 
+function mapTopBarItems(rows: any[]): TopBarItem[] {
+  return rows
+    .map((row: any, index: number) => ({
+      id: String(row.id),
+      label: row.label || '',
+      valueText: row.value_text ?? row.valueText ?? '',
+      description: row.description || '',
+      icon: row.icon || 'star',
+      active: row.active === undefined ? true : Boolean(row.active),
+      sortOrder: Number(row.sort_order ?? row.sortOrder ?? index + 1),
+    }))
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+}
+
 function slugify(value: string) {
   return value.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
 }
@@ -322,6 +352,15 @@ async function ensureDb() {
       description TEXT NOT NULL,
       icon TEXT NOT NULL
     )`
+    await db`CREATE TABLE IF NOT EXISTS top_bar_items (
+      id TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      value_text TEXT NOT NULL DEFAULT '',
+      description TEXT NOT NULL DEFAULT '',
+      icon TEXT NOT NULL DEFAULT 'star',
+      active BOOLEAN NOT NULL DEFAULT TRUE,
+      sort_order INTEGER NOT NULL DEFAULT 0
+    )`
     await db`CREATE TABLE IF NOT EXISTS bookings (
       id TEXT PRIMARY KEY,
       property_id TEXT NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
@@ -379,6 +418,11 @@ async function ensureDb() {
       await db`INSERT INTO bonus_rules (key, amount, label, description, icon)
         VALUES (${key}, ${rule.amount}, ${rule.label}, ${rule.description}, ${rule.icon})
         ON CONFLICT (key) DO NOTHING`
+    }
+    for (const item of topBarDefaults) {
+      await db`INSERT INTO top_bar_items (id, label, value_text, description, icon, active, sort_order)
+        VALUES (${item.id}, ${item.label}, ${item.valueText}, ${item.description}, ${item.icon}, ${item.active}, ${item.sortOrder})
+        ON CONFLICT (id) DO NOTHING`
     }
     for (const entry of leaderboard) {
       await db`INSERT INTO leaderboard_entries (name, total, bookings)
@@ -713,6 +757,43 @@ app.patch('/api/bonus-rules', async (c) => {
   }
   const rows = await db`SELECT * FROM bonus_rules`
   return c.json(mapBonusRules(rows))
+})
+
+// ─── Top Bar Items API ─────────────────────────────────────────────────────────
+app.get('/api/top-bar-items', async (c) => {
+  if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT * FROM top_bar_items ORDER BY sort_order ASC`
+  return c.json(mapTopBarItems(rows))
+})
+
+app.patch('/api/top-bar-items', async (c) => {
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const body = await c.req.json<{ items?: Partial<TopBarItem>[] }>()
+  const incoming = Array.isArray(body.items) ? body.items.slice(0, 8) : []
+  const items = incoming.map((item, index) => ({
+    id: item.id && String(item.id).trim() ? String(item.id).trim() : `top-${Date.now()}-${index}`,
+    label: String(item.label || '').trim().slice(0, 40),
+    valueText: String(item.valueText || '').trim().slice(0, 24),
+    description: String(item.description || '').trim().slice(0, 60),
+    icon: String(item.icon || 'star').trim().replace(/[^a-z0-9-]/gi, '').slice(0, 40) || 'star',
+    active: item.active !== false,
+    sortOrder: index + 1,
+  })).filter((item) => item.label || item.valueText || item.description)
+
+  await db.begin(async (tx) => {
+    await tx`DELETE FROM top_bar_items`
+    for (const item of items) {
+      await tx`INSERT INTO top_bar_items (id, label, value_text, description, icon, active, sort_order)
+        VALUES (${item.id}, ${item.label}, ${item.valueText}, ${item.description}, ${item.icon}, ${item.active}, ${item.sortOrder})`
+    }
+  })
+
+  const rows = await db`SELECT * FROM top_bar_items ORDER BY sort_order ASC`
+  return c.json(mapTopBarItems(rows))
 })
 
 // ─── Changelog API ─────────────────────────────────────────────────────────────
@@ -1433,12 +1514,33 @@ app.get('*', (c) => {
       </div>
     </div>
 
+    <!-- Top Bar Editor -->
+    <div class="parchment rounded-xl overflow-hidden card-shadow" id="top-bar-panel">
+      <div class="bg-bounty-dark px-5 py-3 flex items-center gap-2">
+        <i class="fas fa-bullhorn text-bounty-gold"></i>
+        <span class="font-display text-white text-base font-bold">Top Bar Spiffs</span>
+        <span class="ml-auto text-bounty-tan/40 text-xs">Controls the announcement pills across the top</span>
+      </div>
+      <div class="p-5">
+        <div id="top-bar-form" class="space-y-3"></div>
+        <div class="mt-4 flex flex-wrap items-center gap-3">
+          <button onclick="addTopBarItem()" class="px-4 py-2 border border-bounty-gold/40 text-bounty-brown font-black rounded uppercase tracking-wide hover:bg-bounty-gold/10 transition-all text-sm">
+            <i class="fas fa-plus mr-1"></i> Add Spiff
+          </button>
+          <button onclick="saveTopBarItems()" class="px-5 py-2 bg-bounty-red text-white font-black rounded uppercase tracking-wide hover:bg-red-800 transition-all text-sm">
+            <i class="fas fa-save mr-1"></i> Save Top Bar
+          </button>
+          <span id="top-bar-save-msg" class="text-xs text-bounty-green font-semibold hidden"><i class="fas fa-check-circle mr-1"></i>Saved!</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Bonus Rules Editor -->
     <div class="parchment rounded-xl overflow-hidden card-shadow" id="bonus-rules-panel">
       <div class="bg-bounty-dark px-5 py-3 flex items-center gap-2">
         <i class="fas fa-star text-bounty-gold"></i>
-        <span class="font-display text-white text-base font-bold">Bonus Rules</span>
-        <span class="ml-auto text-bounty-tan/40 text-xs">Changes apply instantly to bar + booking calculator</span>
+        <span class="font-display text-white text-base font-bold">Booking Bonus Rules</span>
+        <span class="ml-auto text-bounty-tan/40 text-xs">Controls booking calculator payout math</span>
       </div>
       <div class="p-5">
         <div id="bonus-rules-form" class="space-y-4"></div>
@@ -1559,6 +1661,11 @@ let allLeaderboard = [];
 let allChangelog   = [];
 let allUsers       = [];
 let allBonusRules  = { lastMinute:{amount:25,label:'LAST MINUTE HERO',description:'within 14 days',icon:'bolt'}, weekend:{amount:15,label:'WEEKEND WARRIOR',description:'Fri or Sat night',icon:'calendar-week'}, longStay:{amount:15,label:'LONG STAY LEGEND',description:'5+ nights',icon:'moon'} };
+let allTopBarItems = [
+  {id:'top-last-minute',label:'LAST MINUTE HERO',valueText:'+$25',description:'within 14 days',icon:'bolt',active:true,sortOrder:1},
+  {id:'top-weekend',label:'WEEKEND WARRIOR',valueText:'+$15',description:'Fri or Sat night',icon:'calendar-week',active:true,sortOrder:2},
+  {id:'top-long-stay',label:'LONG STAY LEGEND',valueText:'+$15',description:'5+ nights',icon:'moon',active:true,sortOrder:3},
+];
 let invitePasswords = {};
 
 // ─ Auth state ─
@@ -1827,6 +1934,7 @@ async function loadAppData() {
   await fetchLeaderboard();
   await fetchChangelog();
   await fetchBonusRules();
+  await fetchTopBarItems();
 }
 
 async function fetchProperties() {
@@ -1844,27 +1952,155 @@ async function fetchChangelog() {
 async function fetchBonusRules() {
   allBonusRules = await authedJson('/api/bonus-rules');
 }
+async function fetchTopBarItems() {
+  allTopBarItems = await authedJson('/api/top-bar-items');
+}
 async function fetchUsers() {
   if (!authToken || authRole !== 'admin') return;
   const r = await fetchWithTimeout('/api/users', { headers:authHeaders() });
   if (r.ok) allUsers = await r.json();
 }
 
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  }[ch]));
+}
+
+function escapeAttr(value) {
+  return escapeHtml(value);
+}
+
 function renderBonusPills() {
   const bar = document.getElementById('bonus-pill-bar');
   if (!bar) return;
-  const rules = [
-    ['lastMinute', allBonusRules.lastMinute],
-    ['weekend',    allBonusRules.weekend],
-    ['longStay',   allBonusRules.longStay],
-  ];
-  bar.innerHTML = rules.map(([,r]) => \`
+  const items = allTopBarItems.filter(item => item.active);
+  bar.innerHTML = items.map((item) => \`
     <div class="flex items-center gap-2 bg-bounty-gold/15 border border-bounty-gold/25 rounded-full px-4 py-1">
-      <i class="fas fa-\${r.icon} text-bounty-gold text-xs"></i>
-      <span class="text-bounty-tan text-xs font-semibold">\${r.label}</span>
-      <span class="text-bounty-gold font-black text-sm">+$\${r.amount}</span>
-      <span class="text-bounty-tan/50 text-xs hidden sm:inline">\${r.description}</span>
+      <i class="fas fa-\${escapeAttr(item.icon)} text-bounty-gold text-xs"></i>
+      <span class="text-bounty-tan text-xs font-semibold">\${escapeHtml(item.label)}</span>
+      \${item.valueText ? \`<span class="text-bounty-gold font-black text-sm">\${escapeHtml(item.valueText)}</span>\` : ''}
+      \${item.description ? \`<span class="text-bounty-tan/50 text-xs hidden sm:inline">\${escapeHtml(item.description)}</span>\` : ''}
     </div>\`).join('');
+}
+
+function topBarIconOptions(selected) {
+  const icons = [
+    ['bolt','Bolt'],
+    ['ticket','Ticket'],
+    ['star','Star'],
+    ['bullhorn','Megaphone'],
+    ['gift','Gift'],
+    ['calendar-week','Calendar'],
+    ['moon','Moon'],
+    ['fire','Fire'],
+    ['trophy','Trophy'],
+    ['dollar-sign','Dollar'],
+  ];
+  return icons.map(([value,label]) => \`<option value="\${value}" \${selected === value ? 'selected' : ''}>\${label}</option>\`).join('');
+}
+
+function renderTopBarForm() {
+  const wrap = document.getElementById('top-bar-form');
+  if (!wrap) return;
+  if (!allTopBarItems.length) {
+    wrap.innerHTML = '<p class="text-gray-400 text-sm text-center py-2">No top bar spiffs yet.</p>';
+    return;
+  }
+  wrap.innerHTML = allTopBarItems.map((item, index) => \`
+    <div class="top-bar-item border border-bounty-gold/20 rounded-lg p-4 bg-white/40" data-id="\${escapeAttr(item.id)}">
+      <div class="grid grid-cols-1 lg:grid-cols-[90px_1fr_150px_1.2fr_150px_auto] gap-3 items-end">
+        <label class="flex items-center gap-2 text-xs font-bold text-bounty-dark pb-3">
+          <input type="checkbox" class="tbi-active" \${item.active ? 'checked' : ''} />
+          Active
+        </label>
+        <div>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Label</label>
+          <input type="text" class="th-input tbi-label" value="\${escapeAttr(item.label)}" placeholder="TICKET SPIFF" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Value</label>
+          <input type="text" class="th-input tbi-value" value="\${escapeAttr(item.valueText)}" placeholder="+$10" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Description</label>
+          <input type="text" class="th-input tbi-description" value="\${escapeAttr(item.description)}" placeholder="per qualifying ticket" />
+        </div>
+        <div>
+          <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Icon</label>
+          <select class="th-input tbi-icon">\${topBarIconOptions(item.icon)}</select>
+        </div>
+        <div class="flex gap-1">
+          <button type="button" onclick="moveTopBarItem(\${index}, -1)" class="px-2 py-2 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10" title="Move up"><i class="fas fa-arrow-up"></i></button>
+          <button type="button" onclick="moveTopBarItem(\${index}, 1)" class="px-2 py-2 border border-bounty-gold/30 rounded text-bounty-brown hover:bg-bounty-gold/10" title="Move down"><i class="fas fa-arrow-down"></i></button>
+          <button type="button" onclick="removeTopBarItem(\${index})" class="px-2 py-2 border border-red-200 rounded text-red-500 hover:bg-red-50" title="Remove"><i class="fas fa-trash"></i></button>
+        </div>
+      </div>
+    </div>
+  \`).join('');
+}
+
+function collectTopBarItemsFromForm() {
+  return [...document.querySelectorAll('.top-bar-item')].map((row, index) => ({
+    id: row.dataset.id || \`top-\${Date.now()}-\${index}\`,
+    label: row.querySelector('.tbi-label')?.value.trim() || '',
+    valueText: row.querySelector('.tbi-value')?.value.trim() || '',
+    description: row.querySelector('.tbi-description')?.value.trim() || '',
+    icon: row.querySelector('.tbi-icon')?.value || 'star',
+    active: Boolean(row.querySelector('.tbi-active')?.checked),
+    sortOrder: index + 1,
+  }));
+}
+
+function addTopBarItem() {
+  allTopBarItems = collectTopBarItemsFromForm();
+  allTopBarItems.push({
+    id: \`top-\${Date.now()}\`,
+    label: 'NEW SPIFF',
+    valueText: '+$10',
+    description: 'per qualifying ticket',
+    icon: 'ticket',
+    active: true,
+    sortOrder: allTopBarItems.length + 1,
+  });
+  renderTopBarForm();
+}
+
+function moveTopBarItem(index, direction) {
+  allTopBarItems = collectTopBarItemsFromForm();
+  const nextIndex = index + direction;
+  if (nextIndex < 0 || nextIndex >= allTopBarItems.length) return;
+  const [item] = allTopBarItems.splice(index, 1);
+  allTopBarItems.splice(nextIndex, 0, item);
+  allTopBarItems = allTopBarItems.map((item, i) => ({...item, sortOrder: i + 1}));
+  renderTopBarForm();
+}
+
+function removeTopBarItem(index) {
+  allTopBarItems = collectTopBarItemsFromForm();
+  allTopBarItems.splice(index, 1);
+  allTopBarItems = allTopBarItems.map((item, i) => ({...item, sortOrder: i + 1}));
+  renderTopBarForm();
+}
+
+async function saveTopBarItems() {
+  const items = collectTopBarItemsFromForm();
+  const res = await fetch('/api/top-bar-items', {
+    method:'PATCH',
+    headers:authHeaders({'Content-Type':'application/json'}),
+    body: JSON.stringify({items}),
+  });
+  if (!res.ok) { alert('Save failed -- are you still logged in?'); return; }
+  allTopBarItems = await res.json();
+  renderTopBarForm();
+  renderBonusPills();
+  const msg = document.getElementById('top-bar-save-msg');
+  msg.classList.remove('hidden');
+  setTimeout(() => msg.classList.add('hidden'), 3000);
 }
 
 function renderBonusRulesForm() {
@@ -1925,7 +2161,6 @@ async function saveBonusRules() {
   });
   if (!res.ok) { alert('Save failed -- are you still logged in?'); return; }
   allBonusRules = await res.json();
-  renderBonusPills();
   const msg = document.getElementById('bonus-save-msg');
   msg.classList.remove('hidden');
   setTimeout(() => msg.classList.add('hidden'), 3000);
@@ -2067,6 +2302,7 @@ function renderLeaderboard() {
 function renderAdmin() {
   renderAdminUsers();
   renderAdminProps();
+  renderTopBarForm();
   renderBonusRulesForm();
   renderAdminChangelog();
   renderAdminBookings();
