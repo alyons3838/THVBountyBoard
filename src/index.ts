@@ -1173,6 +1173,45 @@ app.get('*', (c) => {
   </div>
 </div>
 
+<!-- ════════════ LOGIN EMAIL HELPER ════════════ -->
+<div id="email-helper" class="hidden fixed inset-0 bg-black/70 z-[9997] flex items-center justify-center px-4">
+  <div class="parchment rounded-2xl p-6 w-full max-w-2xl card-shadow relative">
+    <button onclick="closeEmailHelper()" class="absolute top-3 right-3 text-bounty-brown hover:text-bounty-red" title="Close">
+      <i class="fas fa-times"></i>
+    </button>
+    <div class="mb-4">
+      <div class="font-display text-bounty-dark text-2xl font-black">Send Login Details</div>
+      <p class="text-gray-500 text-sm mt-1">Copy the details or open a web email draft.</p>
+    </div>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-3">
+      <div>
+        <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">To</label>
+        <input type="email" id="email-helper-to" class="th-input" />
+      </div>
+      <div>
+        <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Subject</label>
+        <input type="text" id="email-helper-subject" class="th-input" />
+      </div>
+    </div>
+    <div>
+      <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase">Message</label>
+      <textarea id="email-helper-body" class="th-input min-h-[180px]"></textarea>
+    </div>
+    <div class="mt-4 flex flex-wrap gap-2">
+      <button onclick="copyEmailHelperBody()" class="px-4 py-2 bg-bounty-dark text-white font-bold rounded text-xs uppercase hover:bg-bounty-brown transition-all">
+        <i class="fas fa-copy mr-1"></i> Copy Message
+      </button>
+      <button onclick="openOutlookDraft()" class="px-4 py-2 bg-bounty-blue text-white font-bold rounded text-xs uppercase hover:opacity-90 transition-all">
+        <i class="fas fa-envelope-open-text mr-1"></i> Open Outlook Draft
+      </button>
+      <button onclick="openDefaultMailDraft()" class="px-4 py-2 border border-bounty-gold/40 text-bounty-brown font-bold rounded text-xs uppercase hover:bg-bounty-gold/10 transition-all">
+        <i class="fas fa-at mr-1"></i> Default Mail App
+      </button>
+    </div>
+    <div id="email-helper-status" class="hidden mt-3 text-xs font-semibold text-bounty-green"></div>
+  </div>
+</div>
+
 <!-- ════════════ HEADER ════════════ -->
 <header class="bg-bounty-dark border-b border-bounty-gold/30 sticky top-0 z-40">
   <div class="max-w-7xl mx-auto px-4">
@@ -2504,22 +2543,72 @@ function buildMailtoHref(user, tempPassword) {
   return \`mailto:\${to}?subject=\${encodeURIComponent(email.subject)}&body=\${encodeURIComponent(email.body)}\`;
 }
 
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    prompt('Copy this text:', text);
+    return false;
+  }
+}
+
 async function copyLoginDetails(userId, tempPassword) {
   const user = allUsers.find(u => u.id === userId);
   if (!user) return;
   const email = buildLoginEmail(user, tempPassword || invitePasswords[userId]);
-  try {
-    await navigator.clipboard.writeText(email.body);
-    alert('Login details copied.');
-  } catch {
-    prompt('Copy login details:', email.body);
-  }
+  const copied = await copyTextToClipboard(email.body);
+  if (copied) alert('Login details copied.');
+}
+
+function openEmailHelper(userId, tempPassword) {
+  const user = allUsers.find(u => u.id === userId);
+  if (!user) return;
+  const helper = document.getElementById('email-helper');
+  const email = buildLoginEmail(user, tempPassword || invitePasswords[userId]);
+  helper.dataset.userId = userId;
+  helper.dataset.tempPassword = tempPassword || invitePasswords[userId] || '';
+  document.getElementById('email-helper-to').value = user.email || '';
+  document.getElementById('email-helper-subject').value = email.subject;
+  document.getElementById('email-helper-body').value = email.body;
+  document.getElementById('email-helper-status').classList.add('hidden');
+  helper.classList.remove('hidden');
+}
+
+function closeEmailHelper() {
+  document.getElementById('email-helper').classList.add('hidden');
+}
+
+async function copyEmailHelperBody() {
+  const body = document.getElementById('email-helper-body').value;
+  const copied = await copyTextToClipboard(body);
+  const status = document.getElementById('email-helper-status');
+  status.textContent = copied ? 'Message copied.' : 'Use the copy box that opened.';
+  status.className = 'mt-3 text-xs font-semibold text-bounty-green';
+}
+
+function emailHelperPayload() {
+  return {
+    to: document.getElementById('email-helper-to').value.trim(),
+    subject: document.getElementById('email-helper-subject').value,
+    body: document.getElementById('email-helper-body').value,
+  };
+}
+
+function openOutlookDraft() {
+  const payload = emailHelperPayload();
+  const params = new URLSearchParams(payload);
+  window.open(\`https://outlook.office.com/mail/deeplink/compose?\${params.toString()}\`, '_blank');
+}
+
+function openDefaultMailDraft() {
+  const payload = emailHelperPayload();
+  const params = new URLSearchParams({subject: payload.subject, body: payload.body});
+  window.location.href = \`mailto:\${encodeURIComponent(payload.to)}?\${params.toString()}\`;
 }
 
 function sendLoginEmail(userId, tempPassword) {
-  const user = allUsers.find(u => u.id === userId);
-  if (!user) return;
-  window.location.href = buildMailtoHref(user, tempPassword || invitePasswords[userId]);
+  openEmailHelper(userId, tempPassword);
 }
 
 function showInviteActions(message, user, tempPassword) {
@@ -2527,7 +2616,7 @@ function showInviteActions(message, user, tempPassword) {
   invitePasswords[user.id] = tempPassword;
   msg.innerHTML = \`
     <span>\${message}</span>
-    <a class="underline font-black ml-2" href="\${buildMailtoHref(user, tempPassword)}">Email login</a>
+    <button type="button" class="underline font-black ml-2" onclick="openEmailHelper('\${user.id}')">Email login</button>
     <button type="button" class="underline font-black ml-2" onclick="copyLoginDetails('\${user.id}')">Copy details</button>
   \`;
   msg.className='text-xs text-bounty-green font-semibold';
