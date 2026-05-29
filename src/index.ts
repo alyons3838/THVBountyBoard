@@ -951,11 +951,26 @@ app.patch('/api/bookings/:id/fulfilled', async (c) => {
   return c.json(mapBooking(updated[0]))
 })
 
+app.delete('/api/bookings/:id', async (c) => {
+  if (!(await isAdmin(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
+  await ensureDb()
+  const db = requireDb()
+  const rows = await db`SELECT id FROM bookings WHERE id = ${c.req.param('id')}`
+  if (!rows.length) return c.json({ error: 'Not found' }, 404)
+  await db`DELETE FROM bookings WHERE id = ${c.req.param('id')}`
+  return c.json({ ok: true })
+})
+
 app.get('/api/leaderboard', async (c) => {
   if (!(await requireSession(c.req.header('x-auth-token')))) return c.json({ error: 'Unauthorized' }, 401)
   await ensureDb()
   const db = requireDb()
-  const rows = await db`SELECT name, total, bookings FROM leaderboard_entries ORDER BY total DESC`
+  const rows = await db`
+    SELECT agent_name AS name, SUM(total_earned)::numeric AS total, COUNT(*)::int AS bookings
+    FROM bookings
+    WHERE status != 'disqualified'
+    GROUP BY agent_name
+    ORDER BY total DESC`
   return c.json(rows.map((row: any) => ({ name: row.name, total: Number(row.total), bookings: Number(row.bookings) })))
 })
 
@@ -2920,6 +2935,10 @@ function renderAdminBookings() {
           <option value="cleared"       \${b.status==='cleared'      ?'selected':''}>Cleared</option>
           <option value="disqualified"  \${b.status==='disqualified' ?'selected':''}>Disqualified</option>
         </select>
+        <button onclick="deleteBooking('\${b.id}')"
+          class="text-xs px-2 py-1 border border-red-200 rounded text-red-500 hover:bg-red-50 transition-all">
+          <i class="fas fa-trash mr-1"></i>Delete
+        </button>
       </div>
     </div>\`;
   }).join('');
@@ -3096,6 +3115,7 @@ async function updateBookingStatus(id, status) {
     body: JSON.stringify({status}),
   });
   await fetchBookings();
+  await fetchLeaderboard();
   renderAdmin();
 }
 
@@ -3112,6 +3132,25 @@ async function updateBookingFulfilled(id, fulfilled) {
     allBookings = allBookings.map(b => b.id === id ? {...b, fulfilled} : b);
   }
   renderAdminBookings();
+}
+
+async function deleteBooking(id) {
+  const booking = allBookings.find(b => b.id === id);
+  const label = booking ? \`\${booking.agentName} -> \${booking.guestName}\` : 'this booking';
+  if (!confirm(\`Delete \${label}? This removes it from review and recalculates the leaderboard.\`)) return;
+  const res = await fetch(\`/api/bookings/\${id}\`, {
+    method:'DELETE',
+    headers:authHeaders(),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    alert(data.error || 'Could not delete booking.');
+    return;
+  }
+  await fetchBookings();
+  await fetchLeaderboard();
+  renderAdmin();
+  renderLeaderboard();
 }
 
 // ════════════════════════════════════════════════════════════
