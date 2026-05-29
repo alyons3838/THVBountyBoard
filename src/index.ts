@@ -1384,7 +1384,7 @@ app.get('*', (c) => {
           <label class="block text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Nightly Rate (USD) *</label>
           <input type="number" id="f-rate" required min="0" placeholder="e.g. 249" class="th-input" />
         </div>
-        <div id="rep-addons-panel" class="bg-bounty-tan/60 rounded-lg p-4 border border-bounty-brown/20">
+        <div id="rep-addons-panel" class="hidden bg-bounty-tan/60 rounded-lg p-4 border border-bounty-brown/20">
           <p class="text-xs font-bold text-bounty-dark mb-1 uppercase tracking-wide">Optional Add-ons</p>
           <p class="text-xs text-gray-500 mb-3">Check any manager-approved extras that apply.</p>
           <div class="space-y-2" id="rep-addons-list"></div>
@@ -1951,6 +1951,7 @@ function showTab(name) {
   }
   if (name === 'board')       renderBoard();
   if (name === 'leaderboard') renderLeaderboard();
+  if (name === 'submit')      renderRepAddOns();
   if (name === 'admin') { fetchUsers().then(() => renderAdmin()); }
   // Update submit wall visibility whenever tab changes
   updateUserChip();
